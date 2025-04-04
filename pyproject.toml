@@ -1,0 +1,32 @@
+[project]
+name = "redis-sizer"
+version = "0.1.0"
+description = "A simple command-line tool for analyzing memory usage across keys in a Redis database."
+authors = [{name = "Mienxiu", email = "mienxiu@gmail.com"}]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer (>=0.15.2,<0.16.0)",
+    "redis (>=5.2.1,<6.0.0)",
+]
+
+[project.urls]
+Homepage = "https://github.com/mienxiu/redis-sizer"
+Documentation = "https://github.com/mienxiu/redis-sizer"
+Repository = "https://github.com/mienxiu/redis-sizer"
+
+[project.scripts]
+redis-sizer = "redis_sizer.cli:app"
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pdm]
+distribution = true
+
+[tool.ruff]
+line-length = 100
+target-version = 'py311'

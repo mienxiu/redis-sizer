@@ -3,7 +3,7 @@
 A simple command-line tool for analyzing memory usage across keys in a Redis database.
 
 
-![Demo](docs/demo.webp)
+![Example table](docs/example_table.png)
 
 redis-sizer can help with the following problems:
 - Optimize caching strategy.

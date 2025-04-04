@@ -71,7 +71,7 @@ class TestScanKeys(unittest.TestCase):
 
         # Call _scan_keys with sample_size=None to collect all keys.
         result: list[str] = _scan_keys(
-            redis=fake_redis, pattern="*", count=100, sample_size=None, console=Console()
+            redis=fake_redis, pattern="*", count=100, sample_size=None, console=Console(), total=4
         )
         self.assertEqual(result, ["key1", "key2", "key3", "key4"])
         fake_redis.scan_iter.assert_called_once_with(match="*", count=100)
@@ -84,7 +84,7 @@ class TestScanKeys(unittest.TestCase):
 
         # Specify sample_size so that only the first two keys should be returned.
         result: list[str] = _scan_keys(
-            redis=fake_redis, pattern="*", count=100, sample_size=2, console=Console()
+            redis=fake_redis, pattern="*", count=100, sample_size=2, console=Console(), total=5
         )
         self.assertEqual(result, ["key1", "key2"])
         fake_redis.scan_iter.assert_called_once_with(match="*", count=100)

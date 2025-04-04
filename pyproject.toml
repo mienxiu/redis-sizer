@@ -1,6 +1,6 @@
 [project]
 name = "redis-sizer"
-version = "0.1.0"
+version = "0.2.0"
 description = "A simple command-line tool for analyzing memory usage across keys in a Redis database."
 authors = [{name = "Mienxiu", email = "mienxiu@gmail.com"}]
 license = "MIT"

@@ -105,7 +105,12 @@ def analyze(
 
     # Scan the keys in the database
     keys = _scan_keys(
-        redis=redis, pattern=pattern, count=scan_count, sample_size=sample_size, console=console
+        redis=redis,
+        pattern=pattern,
+        count=scan_count,
+        sample_size=sample_size,
+        console=console,
+        total=total_size,
     )
     if not keys:
         console.print(f"[yellow]No keys found matching the pattern: {pattern}[/yellow]")
@@ -240,17 +245,22 @@ def analyze(
 
 
 def _scan_keys(
-    redis: Redis, pattern: str, count: int, sample_size: int | None, console: Console
+    redis: Redis,
+    pattern: str,
+    count: int,
+    sample_size: int | None,
+    console: Console,
+    total: int | None = None,
 ) -> list[str]:
     """
     Scan keys in the Redis database using the given pattern.
-    If sample_size is None, perform a full iteration.
+    If sample_size is None, perform a full iteration and estimate progress using total.
     """
     keys = []
     for key in track(
         redis.scan_iter(match=pattern, count=count),
         description="Scanning keys...",
-        total=sample_size,
+        total=sample_size or total,
         console=console,
         show_speed=False,
     ):

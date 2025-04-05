@@ -2,8 +2,7 @@
 
 A simple command-line tool for analyzing memory usage across keys in a Redis database.
 
-
-![Example table](docs/example_table.png)
+![Sample output](https://raw.githubusercontent.com/mienxiu/redis-sizer/refs/heads/main/docs/sample_output.png)
 
 redis-sizer can help with the following problems:
 - Optimize caching strategy.
@@ -36,7 +35,7 @@ Options:
 - `--pattern`: Pattern to filter keys [default: *]
 - `--sample-size`: Number of keys to sample [default: None]
 - `--namespace-separator`: Separator for key namespaces [default: :]
-- `--namespace-level`: Number of namespace levels to aggregate keys by. 0 means no aggregation. [default: 0]
+- `--namespace-level`: Maximum number of namespace levels to aggregate keys by. 0 means no aggregation. [default: 0]
 - `--memory-unit`: Memory unit for display in result table [default: B]
 - `--top`: Maximum number of rows to display in result table [default: 10]
 - `--scan-count`: `COUNT` option for scanning keys [default: 1000]
@@ -47,49 +46,23 @@ Options:
 Many applications using Redis adopt hierarchical key naming conventions.
 redis-sizer leverages this structure to aggregate and analyze memory usage, helping you quickly identify which key groups consume the most memory.
 
-For example, if your keys follow a colon-delimited format (e.g., `users:profiles:001`, `users:logs:login:002`), the hierarchy can be visualized like a tree structure:
+For example, if your keys follow a colon-delimited format (e.g., `users:profiles:...`, `users:logs:...`, `sessions:active:...`), the hierarchy can be visualized like a tree structure:
 
 ```
 DB
 ├── users:
 │   ├── profiles:
-│   │   ├── 001
-│   │   └── 002
+│   │   ├── ...
 │   └── logs:
-│       ├── 001
-│       └── 002
+│       ├── ...
 ├── sessions:
 │   └── active:
 ...
 ```
 
-Use `--namespace-level 1` to aggregate memory usage at the top-level namespace:
+Using `--namespace-level 2` prints out memory usage tabels up to the second-level namespace:
 
-```console
-  Key                │  Count  │ Size (MB) │ ... │ Memory Usage (%)  
-╶────────────────────┼─────────┼───────────┼─────┼──────────────────╴
-  users              │ 350000  │   2460.86 │ ... │           93.82  
-  sessions           │  60000  │    140.23 │ ... │            5.35  
-  cache              │  10000  │     20.07 │ ... │            0.77  
-  tokens             │    700  │      1.75 │ ... │            0.07  
-╶────────────────────┼─────────┼───────────┼─────┼──────────────────╴
-  Total Keys Scanned │ 420700  │   2622.90 │ ... │          100.00  
-```
-
-Use `--namespace-level 2` to aggregate memory usage at the second-level namespace:
-
-```console
-  Key                │  Count  │ Size (MB) │ ... │ Memory Usage (%)  
-╶────────────────────┼─────────┼───────────┼─────┼──────────────────╴
-  users:profiles     │ 100000  │   1177.22 │ ... │            44.88  
-  users:logs         │ 200000  │    988.01 │ ... │            37.67  
-  sessions:active    │  50000  │    295.64 │ ... │            11.27  
-  cache:images       │  40000  │    100.02 │ ... │             3.81  
-  cache:queries      │  20000  │     40.21 │ ... │             1.53  
-  tokens:auth        │    700  │      1.75 │ ... │             0.07  
-╶────────────────────┼─────────┼───────────┼─────┼──────────────────╴
-  Total Keys Scanned │ 420700  │   2622.90 │ ... |           100.00  
-```
+![Example output](https://raw.githubusercontent.com/mienxiu/redis-sizer/refs/heads/main/docs/example_output.png)
 
 ## Considerations
 

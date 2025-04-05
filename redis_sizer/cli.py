@@ -56,7 +56,8 @@ def analyze(
     namespace_level: Annotated[
         int,
         typer.Option(
-            min=0, help="Number of namespace levels to aggregate keys by. 0 means no aggregation."
+            min=0,
+            help="Maximum number of namespace levels to aggregate keys by. 0 means no aggregation.",
         ),
     ] = 0,
     memory_unit: Annotated[
@@ -134,113 +135,121 @@ def analyze(
 
     redis.close()
 
-    # Aggregate memory usage by key groups
-    group_data: dict[str, dict] = {}  # group -> {keys: [], size: 0, sizes: []}
-    overall_min: int | None = None
-    overall_max: int = 0
-    valid_keys_count: int = 0
-    for key in keys:
-        memory_usage: int | None = memory_usage_by_key[key]
-        # Memory usage is None for expired keys
-        if memory_usage is None:
-            continue
-        group: str = _parse_key_group(key, namespace_separator, namespace_level)
-        if group not in group_data:
-            group_data[group] = {"keys": [], "size": 0, "sizes": []}
-        group_data[group]["keys"].append(key)
-        group_data[group]["size"] += memory_usage
-        group_data[group]["sizes"].append(memory_usage)
-        overall_min = memory_usage if overall_min is None else min(overall_min, memory_usage)
-        overall_max = max(overall_max, memory_usage)
-        valid_keys_count += 1
+    for level in range(0, namespace_level + 1):
+        # Aggregate memory usage for this namespace level
+        group_data: dict[str, dict] = {}  # group -> {keys: [], size: 0, sizes: []}
+        overall_min: int | None = None
+        overall_max: int = 0
+        valid_keys_count: int = 0
+        for key in keys:
+            memory_usage: int | None = memory_usage_by_key[key]
+            if memory_usage is None:
+                continue
+            group: str = _parse_key_group(key, namespace_separator, level)
+            if group not in group_data:
+                group_data[group] = {"keys": [], "size": 0, "sizes": []}
+            group_data[group]["keys"].append(key)
+            group_data[group]["size"] += memory_usage
+            group_data[group]["sizes"].append(memory_usage)
+            overall_min = memory_usage if overall_min is None else min(overall_min, memory_usage)
+            overall_max = max(overall_max, memory_usage)
+            valid_keys_count += 1
 
-    if valid_keys_count == 0:
-        console.print("[yellow]No valid keys found. The scanned keys might have expired. [/yellow]")
-        return
-
-    # Sort the groups by size in descending order
-    sorted_groups = sorted(
-        (
-            (group, data["size"], data["sizes"], len(data["keys"]))
-            for group, data in group_data.items()
-        ),
-        key=lambda x: x[1],
-        reverse=True,
-    )
-
-    # Get hidden_count to limit the number of displayed groups if top is specified
-    total_key_groups: int = len(sorted_groups)
-    if top is not None and top > 0 and top < total_key_groups:
-        group_data_for_rows = sorted_groups[:top]
-        hidden_count = total_key_groups - top
-    else:
-        group_data_for_rows = sorted_groups
-        hidden_count = 0
-
-    # Prepare the rows
-    rows: list[TableRow] = []
-    factor: int = _get_memory_unit_factor(memory_unit)
-    total_size: int = sum(group["size"] for group in group_data.values())
-    for group, size, sizes, count in group_data_for_rows:
-        display_key: str = group if namespace_level == 0 else f"{group}[dim]*[/dim]"
-        size_converted: float = size / factor
-        display_size: str = (
-            f"{size_converted:.2f}" if memory_unit != MemoryUnit.B else f"{int(size_converted)}"
-        )
-        avg_usage = (sum(sizes) / len(sizes)) / factor if sizes else 0
-        min_usage = min(sizes) / factor if sizes else 0
-        max_usage = max(sizes) / factor if sizes else 0
-        percentage = (size / total_size * 100) if total_size else 0
-        rows.append(
-            TableRow(
-                key=display_key,
-                count=str(count),
-                size=display_size,
-                avg_size=f"{avg_usage:.4f}" if memory_unit != MemoryUnit.B else f"{int(avg_usage)}",
-                min_size=f"{min_usage:.4f}" if memory_unit != MemoryUnit.B else f"{int(min_usage)}",
-                max_size=f"{max_usage:.4f}" if memory_unit != MemoryUnit.B else f"{int(max_usage)}",
-                percentage=f"{percentage:.2f}",
+        if valid_keys_count == 0:
+            console.print(
+                f"[yellow]No valid keys found for namespace level {level}. The scanned keys might have expired.[/yellow]"
             )
+            continue
+
+        # Sort the groups by size in descending order and limit if 'top' is specified
+        sorted_groups = sorted(
+            (
+                (group, data["size"], data["sizes"], len(data["keys"]))
+                for group, data in group_data.items()
+            ),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        total_key_groups: int = len(sorted_groups)
+        if top is not None and top > 0 and top < total_key_groups:
+            group_data_for_rows = sorted_groups[:top]
+            hidden_count = total_key_groups - top
+        else:
+            group_data_for_rows = sorted_groups
+            hidden_count = 0
+
+        # Prepare table rows for current namespace level
+        rows: list[TableRow] = []
+        factor: int = _get_memory_unit_factor(memory_unit)
+        total_size: int = sum(group["size"] for group in group_data.values())
+        for group, size, sizes, count in group_data_for_rows:
+            display_key: str = group if level == 0 else f"{group}[dim]*[/dim]"
+            size_converted: float = size / factor
+            display_size: str = (
+                f"{size_converted:.2f}" if memory_unit != MemoryUnit.B else f"{int(size_converted)}"
+            )
+            avg_usage = (sum(sizes) / len(sizes)) / factor if sizes else 0
+            min_usage = min(sizes) / factor if sizes else 0
+            max_usage = max(sizes) / factor if sizes else 0
+            percentage = (size / total_size * 100) if total_size else 0
+            rows.append(
+                TableRow(
+                    key=display_key,
+                    count=str(count),
+                    size=display_size,
+                    avg_size=f"{avg_usage:.4f}"
+                    if memory_unit != MemoryUnit.B
+                    else f"{int(avg_usage)}",
+                    min_size=f"{min_usage:.4f}"
+                    if memory_unit != MemoryUnit.B
+                    else f"{int(min_usage)}",
+                    max_size=f"{max_usage:.4f}"
+                    if memory_unit != MemoryUnit.B
+                    else f"{int(max_usage)}",
+                    percentage=f"{percentage:.2f}",
+                )
+            )
+
+        # Prepare the total row
+        total_usage_display: str = (
+            f"{total_size / factor:.2f}"
+            if memory_unit != MemoryUnit.B
+            else f"{int(total_size / factor)}"
+        )
+        overall_avg: float = (total_size / valid_keys_count) / factor
+        overall_min_conv: float = (overall_min or 0) / factor
+        overall_max_conv: float = overall_max / factor
+        overall_avg_display: str = (
+            f"{overall_avg:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_avg)}"
+        )
+        overall_min_display: str = (
+            f"{overall_min_conv:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_min_conv)}"
+        )
+        overall_max_display: str = (
+            f"{overall_max_conv:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_max_conv)}"
+        )
+        total_count: int = sum(len(group["keys"]) for group in group_data.values())
+        total_row: TableRow = TableRow(
+            key="Total Keys Scanned",
+            count=str(total_count),
+            size=total_usage_display,
+            avg_size=overall_avg_display,
+            min_size=overall_min_display,
+            max_size=overall_max_display,
+            percentage="100.00",
         )
 
-    # Prepare the total row
-    total_usage_display: str = (
-        f"{total_size / factor:.2f}"
-        if memory_unit != MemoryUnit.B
-        else f"{int(total_size / factor)}"
-    )
-    overall_avg: float = (total_size / valid_keys_count) / factor
-    overall_min_conv: float = (overall_min or 0) / factor
-    overall_max_conv: float = overall_max / factor
-    overall_avg_display: str = (
-        f"{overall_avg:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_avg)}"
-    )
-    overall_min_display: str = (
-        f"{overall_min_conv:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_min_conv)}"
-    )
-    overall_max_display: str = (
-        f"{overall_max_conv:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_max_conv)}"
-    )
-    total_count: int = sum(len(group["keys"]) for group in group_data.values())
-    total_row: TableRow = TableRow(
-        key="Total Keys Scanned",
-        count=str(total_count),
-        size=total_usage_display,
-        avg_size=overall_avg_display,
-        min_size=overall_min_display,
-        max_size=overall_max_display,
-        percentage="100.00",
-    )
+        _print_memory_usage_table(
+            title=f"Memory Usage Table for Namespace Level {level}",
+            rows=rows,
+            total_row=total_row,
+            hidden_count=hidden_count,
+            memory_unit=memory_unit,
+            show_extra_stats=(level != 0),
+            console=console,
+        )
+        console.print("")  # Add a blank line between tables
 
-    _print_memory_usage_table(
-        rows=rows,
-        total_row=total_row,
-        hidden_count=hidden_count,
-        memory_unit=memory_unit,
-        console=console,
-    )
-
-    # Print the total execution time taken
     console.print(f"Took {(time.time() - start_time):.2f} seconds")
 
 
@@ -315,39 +324,76 @@ def _get_memory_unit_factor(memory_unit: MemoryUnit) -> int:
 
 
 def _print_memory_usage_table(
+    title: str,
     rows: list[TableRow],
     total_row: TableRow,
     hidden_count: int,
     memory_unit: MemoryUnit,
+    show_extra_stats: bool,  # new parameter to control detail columns
     console: Console,
 ):
-    table: Table = Table(box=box.MINIMAL)
+    """
+    - show_extra_stats: If True, show (Avg, Min, Max) size in the table.
+    """
+    table: Table = Table(title=title, box=box.MINIMAL)
     table.add_column("Key", justify="left")
     table.add_column("Count", justify="right", style="green")
     table.add_column(f"Size ({memory_unit.upper()})", justify="right", style="magenta")
-    table.add_column(f"Avg Size ({memory_unit.upper()})", justify="right", style="orange1")
-    table.add_column(f"Min Size ({memory_unit.upper()})", justify="right", style="yellow")
-    table.add_column(f"Max Size ({memory_unit.upper()})", justify="right", style="red")
+    if show_extra_stats:
+        table.add_column(f"Avg Size ({memory_unit.upper()})", justify="right", style="orange1")
+        table.add_column(f"Min Size ({memory_unit.upper()})", justify="right", style="yellow")
+        table.add_column(f"Max Size ({memory_unit.upper()})", justify="right", style="red")
     table.add_column("Memory Usage (%)", justify="right", style="cyan")
+
     for row in rows:
-        table.add_row(
-            row.key, row.count, row.size, row.avg_size, row.min_size, row.max_size, row.percentage
-        )
-    if 0 < hidden_count:
-        table.add_row(
-            f"... {hidden_count} more entries not shown ...", "", "", "", "", "", "", style="dim"
-        )
+        if show_extra_stats:
+            table.add_row(
+                row.key,
+                row.count,
+                row.size,
+                row.avg_size,
+                row.min_size,
+                row.max_size,
+                row.percentage,
+            )
+        else:
+            table.add_row(row.key, row.count, row.size, row.percentage)
+
+    if hidden_count > 0:
+        if show_extra_stats:
+            table.add_row(
+                f"... {hidden_count} more entries not shown ...",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                style="dim",
+            )
+        else:
+            table.add_row(f"... {hidden_count} more entries not shown ...", "", "", "", style="dim")
     table.add_section()
-    table.add_row(
-        total_row.key,
-        total_row.count,
-        total_row.size,
-        total_row.avg_size,
-        total_row.min_size,
-        total_row.max_size,
-        total_row.percentage,
-        style="bold",
-    )
+
+    if show_extra_stats:
+        table.add_row(
+            total_row.key,
+            total_row.count,
+            total_row.size,
+            total_row.avg_size,
+            total_row.min_size,
+            total_row.max_size,
+            total_row.percentage,
+            style="bold",
+        )
+    else:
+        table.add_row(
+            total_row.key,
+            total_row.count,
+            total_row.size,
+            total_row.percentage,
+            style="bold",
+        )
     console.print(table)
 
 

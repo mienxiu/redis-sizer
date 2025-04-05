@@ -198,12 +198,13 @@ class TestGetMemoryUnitFactor(unittest.TestCase):
 class TestPrintMemoryUsage(unittest.TestCase):
     """Test the _print_memory_usage_table function."""
 
-    def _test_print_memory_usage(self) -> None:
+    def test_print_memory_usage(self) -> None:
         """
         Sanity check for _print_memory_usage_table.
         NOTE Verifying console output is flaky as results may vary based on the terminal width.
         """
         _print_memory_usage_table(
+            title="Test Memory Usage",
             rows=[
                 TableRow(
                     key="key",
@@ -226,6 +227,7 @@ class TestPrintMemoryUsage(unittest.TestCase):
             ),
             hidden_count=0,
             memory_unit=MemoryUnit.B,
+            show_extra_stats=False,
             console=Console(),
         )
 

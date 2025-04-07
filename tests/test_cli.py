@@ -103,44 +103,6 @@ class TestScanKeys(unittest.TestCase):
         fake_redis.scan_iter.assert_called_once_with(match="nonexistent", count=100)
 
 
-class TestParseKeyGroup(unittest.TestCase):
-    """Test the _parse_key_group function."""
-
-    def test_parse_key_group_basic(self):
-        """Test basic prefix parsing with default separator."""
-        self.assertEqual(_parse_key_group("a:b:c", ":", 0), "a:b:c")
-        self.assertEqual(_parse_key_group("a:b:c", ":", 1), "a")
-        self.assertEqual(_parse_key_group("a:b:c", ":", 2), "a:b")
-        self.assertEqual(_parse_key_group("a:b:c", ":", 3), "a:b:c")
-        self.assertEqual(_parse_key_group("a:b:c", ":", 4), "a:b:c")
-
-    def test_parse_key_group_custom_separator(self):
-        """Test prefix parsing with custom separators"""
-        self.assertEqual(_parse_key_group("a-b-c", "-", 0), "a-b-c")
-        self.assertEqual(_parse_key_group("a-b-c", "-", 1), "a")
-        self.assertEqual(_parse_key_group("a-b-c", "-", 2), "a-b")
-        self.assertEqual(_parse_key_group("a-b-c", "-", 3), "a-b-c")
-        self.assertEqual(_parse_key_group("a-b-c", "-", 4), "a-b-c")
-
-    def test_parse_key_group_no_separator(self):
-        """Test parsing when the separator doesn't exist in the key."""
-        self.assertEqual(_parse_key_group("a", ":", 1), "a")
-        self.assertEqual(_parse_key_group("a", ":", 2), "a")
-        self.assertEqual(_parse_key_group("a", ":", 3), "a")
-
-    def test_parse_key_group_empty_string(self):
-        """Test parsing with an empty string as the key."""
-        self.assertEqual(_parse_key_group("", ":", 1), "")
-        self.assertEqual(_parse_key_group("", ":", 2), "")
-        self.assertEqual(_parse_key_group("", "-", 3), "")
-
-    def test_parse_key_group_consecutive_separators(self):
-        """Test parsing with consecutive separators."""
-        self.assertEqual(_parse_key_group("a::b:c", ":", 2), "a:")
-        self.assertEqual(_parse_key_group(":a:b:c", ":", 2), ":a")
-        self.assertEqual(_parse_key_group("a:b::", ":", 3), "a:b:")
-
-
 class TestGetMemoryUsage(unittest.TestCase):
     """Test the _get_memory_usage function."""
 
@@ -177,6 +139,44 @@ class TestGetMemoryUsage(unittest.TestCase):
         self.mock_redis.register_script.assert_called_once()
         self.mock_script.assert_called_once_with(keys=keys)
         self.assertEqual(result, {})
+
+
+class TestParseKeyGroup(unittest.TestCase):
+    """Test the _parse_key_group function."""
+
+    def test_parse_key_group_basic(self):
+        """Test basic prefix parsing with default separator."""
+        self.assertEqual(_parse_key_group("a:b:c", ":", 0), "a:b:c")
+        self.assertEqual(_parse_key_group("a:b:c", ":", 1), "a")
+        self.assertEqual(_parse_key_group("a:b:c", ":", 2), "a:b")
+        self.assertEqual(_parse_key_group("a:b:c", ":", 3), "a:b:c")
+        self.assertEqual(_parse_key_group("a:b:c", ":", 4), "a:b:c")
+
+    def test_parse_key_group_custom_separator(self):
+        """Test prefix parsing with custom separators"""
+        self.assertEqual(_parse_key_group("a-b-c", "-", 0), "a-b-c")
+        self.assertEqual(_parse_key_group("a-b-c", "-", 1), "a")
+        self.assertEqual(_parse_key_group("a-b-c", "-", 2), "a-b")
+        self.assertEqual(_parse_key_group("a-b-c", "-", 3), "a-b-c")
+        self.assertEqual(_parse_key_group("a-b-c", "-", 4), "a-b-c")
+
+    def test_parse_key_group_no_separator(self):
+        """Test parsing when the separator doesn't exist in the key."""
+        self.assertEqual(_parse_key_group("a", ":", 1), "a")
+        self.assertEqual(_parse_key_group("a", ":", 2), "a")
+        self.assertEqual(_parse_key_group("a", ":", 3), "a")
+
+    def test_parse_key_group_empty_string(self):
+        """Test parsing with an empty string as the key."""
+        self.assertEqual(_parse_key_group("", ":", 1), "")
+        self.assertEqual(_parse_key_group("", ":", 2), "")
+        self.assertEqual(_parse_key_group("", "-", 3), "")
+
+    def test_parse_key_group_consecutive_separators(self):
+        """Test parsing with consecutive separators."""
+        self.assertEqual(_parse_key_group("a::b:c", ":", 2), "a:")
+        self.assertEqual(_parse_key_group(":a:b:c", ":", 2), ":a")
+        self.assertEqual(_parse_key_group("a:b::", ":", 3), "a:b:")
 
 
 class TestGetMemoryUnitFactor(unittest.TestCase):

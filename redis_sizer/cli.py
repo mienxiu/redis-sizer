@@ -279,18 +279,6 @@ def _scan_keys(
     return keys
 
 
-def _parse_key_group(key: str, separator: str, level: int) -> str:
-    """
-    Parse the key group of a key up to the specified level using the given separator.
-    For example, _parse_key_group("a:b:c:d", ":", 2) -> "a:b"
-
-    If level is 0, return the entire key.
-    """
-    if level == 0:
-        return key
-    return separator.join(key.split(separator)[:level])
-
-
 def _get_memory_usage(redis: Redis, keys: list[str]) -> dict[str, int | None]:
     """
     Get memory usage for a list of keys using Lua script.
@@ -305,6 +293,18 @@ def _get_memory_usage(redis: Redis, keys: list[str]) -> dict[str, int | None]:
     """
     func = redis.register_script(script)
     return dict(zip(keys, func(keys=keys)))  # type: ignore
+
+
+def _parse_key_group(key: str, separator: str, level: int) -> str:
+    """
+    Parse the key group of a key up to the specified level using the given separator.
+    For example, _parse_key_group("a:b:c:d", ":", 2) -> "a:b"
+
+    If level is 0, return the entire key.
+    """
+    if level == 0:
+        return key
+    return separator.join(key.split(separator)[:level])
 
 
 def _get_memory_unit_factor(memory_unit: MemoryUnit) -> int:

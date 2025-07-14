@@ -7,10 +7,11 @@ from typer.testing import CliRunner
 from redis_sizer.cli import (
     MemoryUnit,
     TableRow,
+    _build_key_tree,
+    _generate_hierarchical_rows,
     _get_memory_unit_factor,
     _get_memory_usage,
-    _parse_key_group,
-    _print_memory_usage_table,
+    _print_hierarchical_table,
     _scan_keys,
     app,
 )
@@ -38,10 +39,6 @@ class TestApp(unittest.TestCase):
     def tearDown(self) -> None:
         self.mock_redis_patcher.stop()
 
-    def test_invalid_namespace_level(self) -> None:
-        result = self.runner.invoke(app, ["localhost", "--namespace-level", "-1"])
-        self.assertNotEqual(result.exit_code, 0)
-
     def test_analyze(self) -> None:
         # Execute the command
         result = self.runner.invoke(app, ["localhost"])
@@ -51,6 +48,7 @@ class TestApp(unittest.TestCase):
         self.assertIn("The total number of keys: 5", result.stdout)
         self.assertIn("Scanning keys...", result.stdout)
         self.assertIn("Calculating memory usage...", result.stdout)
+        self.assertIn("Memory Usage Hierarchical View", result.stdout)
         self.assertIn("Took", result.stdout)
 
         # Verify Redis was called correctly
@@ -141,42 +139,60 @@ class TestGetMemoryUsage(unittest.TestCase):
         self.assertEqual(result, {})
 
 
-class TestParseKeyGroup(unittest.TestCase):
-    """Test the _parse_key_group function."""
+class TestBuildKeyTree(unittest.TestCase):
+    """Test the _build_key_tree function."""
 
-    def test_parse_key_group_basic(self):
-        """Test basic prefix parsing with default separator."""
-        self.assertEqual(_parse_key_group("a:b:c", ":", 0), "a:b:c")
-        self.assertEqual(_parse_key_group("a:b:c", ":", 1), "a")
-        self.assertEqual(_parse_key_group("a:b:c", ":", 2), "a:b")
-        self.assertEqual(_parse_key_group("a:b:c", ":", 3), "a:b:c")
-        self.assertEqual(_parse_key_group("a:b:c", ":", 4), "a:b:c")
+    def test_build_key_tree_basic(self):
+        """Test building a basic key tree."""
+        keys = ["users:profiles:123", "users:profiles:456", "users:logs:789", "sessions:active:111"]
+        memory_usage = {
+            "users:profiles:123": 100,
+            "users:profiles:456": 200,
+            "users:logs:789": 300,
+            "sessions:active:111": 400,
+        }
 
-    def test_parse_key_group_custom_separator(self):
-        """Test prefix parsing with custom separators"""
-        self.assertEqual(_parse_key_group("a-b-c", "-", 0), "a-b-c")
-        self.assertEqual(_parse_key_group("a-b-c", "-", 1), "a")
-        self.assertEqual(_parse_key_group("a-b-c", "-", 2), "a-b")
-        self.assertEqual(_parse_key_group("a-b-c", "-", 3), "a-b-c")
-        self.assertEqual(_parse_key_group("a-b-c", "-", 4), "a-b-c")
+        root = _build_key_tree(keys, memory_usage, ":")  # type: ignore
 
-    def test_parse_key_group_no_separator(self):
-        """Test parsing when the separator doesn't exist in the key."""
-        self.assertEqual(_parse_key_group("a", ":", 1), "a")
-        self.assertEqual(_parse_key_group("a", ":", 2), "a")
-        self.assertEqual(_parse_key_group("a", ":", 3), "a")
+        # Check root structure
+        self.assertEqual(len(root.children), 2)  # users and sessions
+        self.assertIn("users", root.children)
+        self.assertIn("sessions", root.children)
 
-    def test_parse_key_group_empty_string(self):
-        """Test parsing with an empty string as the key."""
-        self.assertEqual(_parse_key_group("", ":", 1), "")
-        self.assertEqual(_parse_key_group("", ":", 2), "")
-        self.assertEqual(_parse_key_group("", "-", 3), "")
+        # Check users branch
+        users_node = root.children["users"]
+        self.assertEqual(users_node.name, "users:")
+        self.assertEqual(len(users_node.children), 2)  # profiles and logs
+        self.assertEqual(users_node.size, 600)  # 100 + 200 + 300
 
-    def test_parse_key_group_consecutive_separators(self):
-        """Test parsing with consecutive separators."""
-        self.assertEqual(_parse_key_group("a::b:c", ":", 2), "a:")
-        self.assertEqual(_parse_key_group(":a:b:c", ":", 2), ":a")
-        self.assertEqual(_parse_key_group("a:b::", ":", 3), "a:b:")
+        # Check profiles branch
+        profiles_node = users_node.children["profiles"]
+        self.assertEqual(profiles_node.name, "profiles:")
+        self.assertEqual(len(profiles_node.keys), 2)
+        self.assertEqual(profiles_node.size, 300)  # 100 + 200
+
+    def test_build_key_tree_with_none_values(self):
+        """Test building tree with some None memory values."""
+        keys = ["a:b", "a:c", "d:e"]
+        memory_usage = {"a:b": 100, "a:c": None, "d:e": 200}
+
+        root = _build_key_tree(keys, memory_usage, ":")
+
+        # a:c should be skipped
+        self.assertEqual(root.size, 300)  # 100 + 200
+        self.assertEqual(len(root.children["a"].keys), 1)  # Only a:b
+
+    def test_build_key_tree_no_namespace(self):
+        """Test building tree with keys that have no namespace."""
+        keys = ["key1", "key2", "ns:key3"]
+        memory_usage = {"key1": 100, "key2": 200, "ns:key3": 300}
+
+        root = _build_key_tree(keys, memory_usage, ":")  # type: ignore
+
+        # Root should have direct keys
+        self.assertEqual(len(root.keys), 2)  # key1 and key2
+        self.assertEqual(len(root.children), 1)  # ns
+        self.assertEqual(root.size, 600)  # Total
 
 
 class TestGetMemoryUnitFactor(unittest.TestCase):
@@ -195,39 +211,84 @@ class TestGetMemoryUnitFactor(unittest.TestCase):
             _get_memory_unit_factor("invalid_unit")  # type: ignore
 
 
-class TestPrintMemoryUsage(unittest.TestCase):
-    """Test the _print_memory_usage_table function."""
+class TestGenerateHierarchicalRows(unittest.TestCase):
+    """Test the _generate_hierarchical_rows function."""
 
-    def test_print_memory_usage(self) -> None:
+    def test_generate_hierarchical_rows(self):
+        """Test generating rows from a key tree."""
+        # Build a simple tree
+        keys = ["users:profiles:123", "users:logs:456", "sessions:789"]
+        memory_usage = {"users:profiles:123": 1000, "users:logs:456": 2000, "sessions:789": 3000}
+
+        root = _build_key_tree(keys, memory_usage, ":")  # type: ignore
+        rows, total_row = _generate_hierarchical_rows(root, memory_usage, MemoryUnit.B, None)  # type: ignore
+
+        # Check that we have the right number of rows
+        # Should have: sessions:, users:, profiles:, users:profiles:123, logs:, users:logs:456, sessions:789
+        self.assertEqual(len(rows), 7)
+
+        # Check total row
+        self.assertEqual(total_row.count, "3")
+        self.assertEqual(total_row.size, "6000")
+        self.assertEqual(total_row.percentage, "100.00")
+
+    def test_generate_hierarchical_rows_with_top(self):
+        """Test generating rows with top limit."""
+        # Build a tree with many keys
+        keys = [f"ns:key{i}" for i in range(10)]
+        memory_usage = {k: 100 * (i + 1) for i, k in enumerate(keys)}
+
+        root = _build_key_tree(keys, memory_usage, ":")  # type: ignore
+        rows, total_row = _generate_hierarchical_rows(root, memory_usage, MemoryUnit.B, top=3)  # type: ignore
+
+        # Should have ns: row, top 3 keys, and "... more keys..." row
+        found_more = any("... " in row.key and "more keys" in row.key for row in rows)
+        self.assertTrue(found_more)
+
+
+class TestPrintHierarchicalTable(unittest.TestCase):
+    """Test the _print_hierarchical_table function."""
+
+    def test_print_hierarchical_table(self) -> None:
         """
-        Sanity check for _print_memory_usage_table.
+        Sanity check for _print_hierarchical_table.
         NOTE Verifying console output is flaky as results may vary based on the terminal width.
         """
-        _print_memory_usage_table(
-            title="Test Memory Usage",
+        _print_hierarchical_table(
+            title="Test Hierarchical Memory Usage",
             rows=[
                 TableRow(
-                    key="key",
-                    count="1",
-                    size="100",
-                    avg_size="1",
-                    min_size="1",
-                    max_size="1",
-                    percentage="100.00",
-                )
+                    key="users:",
+                    count="10",
+                    size="1000",
+                    avg_size="100",
+                    min_size="50",
+                    max_size="150",
+                    percentage="50.00",
+                    level=1,
+                ),
+                TableRow(
+                    key="  profiles:",
+                    count="5",
+                    size="500",
+                    avg_size="100",
+                    min_size="80",
+                    max_size="120",
+                    percentage="25.00",
+                    level=2,
+                ),
             ],
             total_row=TableRow(
-                key="1",
-                count="1",
-                size="100",
-                avg_size="1",
-                min_size="1",
-                max_size="1",
+                key="Total Keys Scanned",
+                count="20",
+                size="2000",
+                avg_size="100",
+                min_size="50",
+                max_size="150",
                 percentage="100.00",
+                level=0,
             ),
-            hidden_count=0,
             memory_unit=MemoryUnit.B,
-            show_extra_stats=False,
             console=Console(),
         )
 

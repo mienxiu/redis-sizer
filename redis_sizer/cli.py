@@ -38,6 +38,22 @@ class TableRow:
     min_size: str
     max_size: str
     percentage: str
+    level: int = 0  # Add level for indentation
+
+
+@dataclass
+class KeyNode:
+    """
+    Represent a node in the key hierarchy tree.
+    """
+
+    name: str
+    full_path: str
+    level: int
+    keys: list[str]
+    size: int
+    sizes: list[int]
+    children: dict[str, "KeyNode"]
 
 
 @app.command()
@@ -53,19 +69,12 @@ def analyze(
     pattern: Annotated[str, typer.Option(help="Pattern to filter keys")] = "*",
     sample_size: Annotated[int | None, typer.Option(help="Number of keys to sample")] = None,
     namespace_separator: Annotated[str, typer.Option(help="Separator for key namespaces")] = ":",
-    namespace_level: Annotated[
-        int,
-        typer.Option(
-            min=0,
-            help="Maximum number of namespace levels to aggregate keys by. 0 means no aggregation.",
-        ),
-    ] = 0,
     memory_unit: Annotated[
         MemoryUnit, typer.Option(help="Memory unit for display in result table")
     ] = MemoryUnit.B,
     top: Annotated[
         int | None, typer.Option(help="Maximum number of rows to display in result table")
-    ] = 10,
+    ] = 5,
     scan_count: Annotated[int, typer.Option(help="COUNT option for scanning keys")] = 1000,
     batch_size: Annotated[int, typer.Option(help="Batch size for calculating memory usage")] = 1000,
 ):
@@ -135,120 +144,24 @@ def analyze(
 
     redis.close()
 
-    for level in range(0, namespace_level + 1):
-        # Aggregate memory usage for this namespace level
-        group_data: dict[str, dict] = {}  # group -> {keys: [], size: 0, sizes: []}
-        overall_min: int | None = None
-        overall_max: int = 0
-        valid_keys_count: int = 0
-        for key in keys:
-            memory_usage: int | None = memory_usage_by_key[key]
-            if memory_usage is None:
-                continue
-            group: str = _parse_key_group(key, namespace_separator, level)
-            if group not in group_data:
-                group_data[group] = {"keys": [], "size": 0, "sizes": []}
-            group_data[group]["keys"].append(key)
-            group_data[group]["size"] += memory_usage
-            group_data[group]["sizes"].append(memory_usage)
-            overall_min = memory_usage if overall_min is None else min(overall_min, memory_usage)
-            overall_max = max(overall_max, memory_usage)
-            valid_keys_count += 1
+    # Build hierarchical tree structure
+    root = _build_key_tree(keys, memory_usage_by_key, namespace_separator)
 
-        if valid_keys_count == 0:
-            console.print(
-                f"[yellow]No valid keys found for namespace level {level}. The scanned keys might have expired.[/yellow]"
-            )
-            continue
+    if not root.children and not root.keys:
+        console.print("[yellow]No valid keys found. The scanned keys might have expired.[/yellow]")
+        return
 
-        # Sort the groups by size in descending order and limit if 'top' is specified
-        sorted_groups = sorted(
-            (
-                (group, data["size"], data["sizes"], len(data["keys"]))
-                for group, data in group_data.items()
-            ),
-            key=lambda x: x[1],
-            reverse=True,
-        )
-        total_key_groups: int = len(sorted_groups)
-        if top is not None and top > 0 and top < total_key_groups:
-            group_data_for_rows = sorted_groups[:top]
-            hidden_count = total_key_groups - top
-        else:
-            group_data_for_rows = sorted_groups
-            hidden_count = 0
+    # Generate table rows from tree
+    rows, total_row = _generate_hierarchical_rows(root, memory_usage_by_key, memory_unit, top)
 
-        # Prepare table rows for current namespace level
-        rows: list[TableRow] = []
-        factor: int = _get_memory_unit_factor(memory_unit)
-        total_size: int = sum(group["size"] for group in group_data.values())
-        for group, size, sizes, count in group_data_for_rows:
-            display_key: str = group if level == 0 else f"{group}[dim]*[/dim]"
-            size_converted: float = size / factor
-            display_size: str = (
-                f"{size_converted:.2f}" if memory_unit != MemoryUnit.B else f"{int(size_converted)}"
-            )
-            avg_usage = (sum(sizes) / len(sizes)) / factor if sizes else 0
-            min_usage = min(sizes) / factor if sizes else 0
-            max_usage = max(sizes) / factor if sizes else 0
-            percentage = (size / total_size * 100) if total_size else 0
-            rows.append(
-                TableRow(
-                    key=display_key,
-                    count=str(count),
-                    size=display_size,
-                    avg_size=f"{avg_usage:.4f}"
-                    if memory_unit != MemoryUnit.B
-                    else f"{int(avg_usage)}",
-                    min_size=f"{min_usage:.4f}"
-                    if memory_unit != MemoryUnit.B
-                    else f"{int(min_usage)}",
-                    max_size=f"{max_usage:.4f}"
-                    if memory_unit != MemoryUnit.B
-                    else f"{int(max_usage)}",
-                    percentage=f"{percentage:.2f}",
-                )
-            )
-
-        # Prepare the total row
-        total_usage_display: str = (
-            f"{total_size / factor:.2f}"
-            if memory_unit != MemoryUnit.B
-            else f"{int(total_size / factor)}"
-        )
-        overall_avg: float = (total_size / valid_keys_count) / factor
-        overall_min_conv: float = (overall_min or 0) / factor
-        overall_max_conv: float = overall_max / factor
-        overall_avg_display: str = (
-            f"{overall_avg:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_avg)}"
-        )
-        overall_min_display: str = (
-            f"{overall_min_conv:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_min_conv)}"
-        )
-        overall_max_display: str = (
-            f"{overall_max_conv:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_max_conv)}"
-        )
-        total_count: int = sum(len(group["keys"]) for group in group_data.values())
-        total_row: TableRow = TableRow(
-            key="Total Keys Scanned",
-            count=str(total_count),
-            size=total_usage_display,
-            avg_size=overall_avg_display,
-            min_size=overall_min_display,
-            max_size=overall_max_display,
-            percentage="100.00",
-        )
-
-        _print_memory_usage_table(
-            title=f"Memory Usage Table for Namespace Level {level}",
-            rows=rows,
-            total_row=total_row,
-            hidden_count=hidden_count,
-            memory_unit=memory_unit,
-            show_extra_stats=(level != 0),
-            console=console,
-        )
-        console.print("")  # Add a blank line between tables
+    # Print the hierarchical table
+    _print_hierarchical_table(
+        title="Memory Usage Hierarchical View",
+        rows=rows,
+        total_row=total_row,
+        memory_unit=memory_unit,
+        console=console,
+    )
 
     console.print(f"Took {(time.time() - start_time):.2f} seconds")
 
@@ -295,16 +208,244 @@ def _get_memory_usage(redis: Redis, keys: list[str]) -> dict[str, int | None]:
     return dict(zip(keys, func(keys=keys)))  # type: ignore
 
 
-def _parse_key_group(key: str, separator: str, level: int) -> str:
+def _build_key_tree(
+    keys: list[str], memory_usage_by_key: dict[str, int | None], separator: str
+) -> KeyNode:
     """
-    Parse the key group of a key up to the specified level using the given separator.
-    For example, _parse_key_group("a:b:c:d", ":", 2) -> "a:b"
+    Build a hierarchical tree structure from keys.
+    """
+    root = KeyNode(name="", full_path="", level=0, keys=[], size=0, sizes=[], children={})
 
-    If level is 0, return the entire key.
+    for key in keys:
+        memory_usage = memory_usage_by_key.get(key)
+        if memory_usage is None:
+            continue
+
+        parts = key.split(separator)
+        current_node = root
+        current_path = ""
+
+        # Navigate/create path in tree
+        for i, part in enumerate(parts[:-1]):
+            current_path = separator.join(parts[: i + 1]) + separator
+            if part not in current_node.children:
+                current_node.children[part] = KeyNode(
+                    name=part + separator,
+                    full_path=current_path,
+                    level=i + 1,
+                    keys=[],
+                    size=0,
+                    sizes=[],
+                    children={},
+                )
+            current_node = current_node.children[part]
+
+        # Add key to the appropriate level
+        if len(parts) > 1:
+            # Key has namespace, add to parent
+            current_node.keys.append(key)
+            current_node.size += memory_usage
+            current_node.sizes.append(memory_usage)
+        else:
+            # Key has no namespace, add to root
+            root.keys.append(key)
+            root.size += memory_usage
+            root.sizes.append(memory_usage)
+
+    # Propagate sizes up the tree
+    _propagate_sizes(root)
+
+    return root
+
+
+def _propagate_sizes(node: KeyNode) -> tuple[int, list[int]]:
     """
-    if level == 0:
-        return key
-    return separator.join(key.split(separator)[:level])
+    Recursively propagate sizes from children to parents.
+    Returns total size and list of all sizes for this subtree.
+    """
+    total_size = node.size
+    all_sizes = node.sizes.copy()
+
+    for child in node.children.values():
+        child_size, child_sizes = _propagate_sizes(child)
+        total_size += child_size
+        all_sizes.extend(child_sizes)
+
+    node.size = total_size
+    node.sizes = all_sizes
+    return total_size, all_sizes
+
+
+def _generate_hierarchical_rows(
+    root: KeyNode,
+    memory_usage_by_key: dict[str, int | None],
+    memory_unit: MemoryUnit,
+    top: int | None,
+) -> tuple[list[TableRow], TableRow]:
+    """
+    Generate table rows from the tree structure with proper indentation.
+    """
+    rows: list[TableRow] = []
+    factor = _get_memory_unit_factor(memory_unit)
+
+    # Track overall statistics
+    overall_min: int | None = None
+    overall_max: int = 0
+    total_count: int = 0
+    total_size: int = 0
+
+    def traverse_node(node: KeyNode, parent_size: int, is_last_level: bool = False):
+        nonlocal overall_min, overall_max, total_count, total_size
+
+        # Update overall stats
+        if node.sizes:
+            for size in node.sizes:
+                overall_min = size if overall_min is None else min(overall_min, size)
+                overall_max = max(overall_max, size)
+            total_count += len(node.keys)
+
+        # Handle direct keys at this level
+        if node.keys:
+            # Sort keys by size
+            key_sizes = [(k, memory_usage_by_key.get(k, 0)) for k in node.keys]
+            key_sizes.sort(key=lambda x: 0 if x[1] is None else x[1], reverse=True)
+
+            # Apply top limit only at leaf level
+            if is_last_level and top and len(key_sizes) > top:
+                displayed_keys = key_sizes[:top]
+                hidden_count = len(key_sizes) - top
+            else:
+                displayed_keys = key_sizes
+                hidden_count = 0
+
+            # Add rows for direct keys
+            for key, size in displayed_keys:
+                if size == 0:
+                    continue
+
+                display_key = "  " * node.level + key
+                size_converted = size or 0 / factor
+                display_size = (
+                    f"{size_converted:.2f}"
+                    if memory_unit != MemoryUnit.B
+                    else f"{int(size_converted)}"
+                )
+                percentage = (size or 0 / parent_size * 100) if parent_size else 0
+
+                rows.append(
+                    TableRow(
+                        key=display_key,
+                        count="1",
+                        size=display_size,
+                        avg_size=display_size,
+                        min_size=display_size,
+                        max_size=display_size,
+                        percentage=f"{percentage:.2f}",
+                        level=node.level,
+                    )
+                )
+
+            if hidden_count > 0:
+                rows.append(
+                    TableRow(
+                        key="  " * node.level + f"... {hidden_count} more keys ...",
+                        count="",
+                        size="",
+                        avg_size="",
+                        min_size="",
+                        max_size="",
+                        percentage="",
+                        level=node.level,
+                    )
+                )
+
+        # Process children namespaces
+        if node.children:
+            # Sort children by size
+            sorted_children = sorted(node.children.items(), key=lambda x: x[1].size, reverse=True)
+
+            for child_name, child_node in sorted_children:
+                if child_node.size == 0:
+                    continue
+
+                # Add namespace row
+                display_key = "  " * (child_node.level - 1) + child_node.name
+                size_converted = child_node.size / factor
+                display_size = (
+                    f"{size_converted:.2f}"
+                    if memory_unit != MemoryUnit.B
+                    else f"{int(size_converted)}"
+                )
+
+                avg_size = (
+                    (sum(child_node.sizes) / len(child_node.sizes)) / factor
+                    if child_node.sizes
+                    else 0
+                )
+                min_size = min(child_node.sizes) / factor if child_node.sizes else 0
+                max_size = max(child_node.sizes) / factor if child_node.sizes else 0
+                percentage = (child_node.size / parent_size * 100) if parent_size else 0
+
+                # Calculate total count recursively
+                def count_keys(n: KeyNode) -> int:
+                    count = len(n.keys)
+                    for child in n.children.values():
+                        count += count_keys(child)
+                    return count
+
+                rows.append(
+                    TableRow(
+                        key=display_key,
+                        count=str(count_keys(child_node)),
+                        size=display_size,
+                        avg_size=f"{avg_size:.4f}"
+                        if memory_unit != MemoryUnit.B
+                        else f"{int(avg_size)}",
+                        min_size=f"{min_size:.4f}"
+                        if memory_unit != MemoryUnit.B
+                        else f"{int(min_size)}",
+                        max_size=f"{max_size:.4f}"
+                        if memory_unit != MemoryUnit.B
+                        else f"{int(max_size)}",
+                        percentage=f"{percentage:.2f}",
+                        level=child_node.level,
+                    )
+                )
+
+                # Check if this child has no sub-children (is last level)
+                child_is_last = len(child_node.children) == 0
+                traverse_node(child_node, parent_size, child_is_last)
+
+    # Start traversal
+    total_size = root.size
+    traverse_node(root, total_size, len(root.children) == 0)
+
+    # Create total row
+    total_usage_display = (
+        f"{total_size / factor:.2f}"
+        if memory_unit != MemoryUnit.B
+        else f"{int(total_size / factor)}"
+    )
+    overall_avg = (total_size / total_count) / factor if total_count > 0 else 0
+    overall_min_conv = (overall_min or 0) / factor
+    overall_max_conv = overall_max / factor
+
+    total_row = TableRow(
+        key="Total Keys Scanned",
+        count=str(total_count),
+        size=total_usage_display,
+        avg_size=f"{overall_avg:.4f}" if memory_unit != MemoryUnit.B else f"{int(overall_avg)}",
+        min_size=f"{overall_min_conv:.4f}"
+        if memory_unit != MemoryUnit.B
+        else f"{int(overall_min_conv)}",
+        max_size=f"{overall_max_conv:.4f}"
+        if memory_unit != MemoryUnit.B
+        else f"{int(overall_max_conv)}",
+        percentage="100.00",
+        level=0,
+    )
+
+    return rows, total_row
 
 
 def _get_memory_unit_factor(memory_unit: MemoryUnit) -> int:
@@ -323,77 +464,55 @@ def _get_memory_unit_factor(memory_unit: MemoryUnit) -> int:
         raise ValueError("Invalid value for memory_unit. Use B, KB, MB, or GB.")
 
 
-def _print_memory_usage_table(
+def _print_hierarchical_table(
     title: str,
     rows: list[TableRow],
     total_row: TableRow,
-    hidden_count: int,
     memory_unit: MemoryUnit,
-    show_extra_stats: bool,  # new parameter to control detail columns
     console: Console,
 ):
     """
-    - show_extra_stats: If True, show (Avg, Min, Max) size in the table.
+    Print hierarchical table with indented keys.
     """
     table: Table = Table(title=title, box=box.MINIMAL)
     table.add_column("Key", justify="left")
     table.add_column("Count", justify="right", style="green")
     table.add_column(f"Size ({memory_unit.upper()})", justify="right", style="magenta")
-    if show_extra_stats:
-        table.add_column(f"Avg Size ({memory_unit.upper()})", justify="right", style="orange1")
-        table.add_column(f"Min Size ({memory_unit.upper()})", justify="right", style="yellow")
-        table.add_column(f"Max Size ({memory_unit.upper()})", justify="right", style="red")
+    table.add_column(f"Avg Size ({memory_unit.upper()})", justify="right", style="orange1")
+    table.add_column(f"Min Size ({memory_unit.upper()})", justify="right", style="yellow")
+    table.add_column(f"Max Size ({memory_unit.upper()})", justify="right", style="red")
     table.add_column("Memory Usage (%)", justify="right", style="cyan")
 
     for row in rows:
-        if show_extra_stats:
-            table.add_row(
-                row.key,
-                row.count,
-                row.size,
-                row.avg_size,
-                row.min_size,
-                row.max_size,
-                row.percentage,
-            )
-        else:
-            table.add_row(row.key, row.count, row.size, row.percentage)
+        # Apply style based on indentation level
+        style = None
+        if "..." in row.key:
+            style = "dim"
+        elif row.level == 1:
+            style = "bold"
 
-    if hidden_count > 0:
-        if show_extra_stats:
-            table.add_row(
-                f"... {hidden_count} more entries not shown ...",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                style="dim",
-            )
-        else:
-            table.add_row(f"... {hidden_count} more entries not shown ...", "", "", "", style="dim")
+        table.add_row(
+            row.key,
+            row.count,
+            row.size,
+            row.avg_size,
+            row.min_size,
+            row.max_size,
+            row.percentage,
+            style=style,
+        )
+
     table.add_section()
-
-    if show_extra_stats:
-        table.add_row(
-            total_row.key,
-            total_row.count,
-            total_row.size,
-            total_row.avg_size,
-            total_row.min_size,
-            total_row.max_size,
-            total_row.percentage,
-            style="bold",
-        )
-    else:
-        table.add_row(
-            total_row.key,
-            total_row.count,
-            total_row.size,
-            total_row.percentage,
-            style="bold",
-        )
+    table.add_row(
+        total_row.key,
+        total_row.count,
+        total_row.size,
+        total_row.avg_size,
+        total_row.min_size,
+        total_row.max_size,
+        total_row.percentage,
+        style="bold",
+    )
     console.print(table)
 
 

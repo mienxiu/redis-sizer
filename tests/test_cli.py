@@ -5,14 +5,14 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from redis_sizer.cli import (
+    KeyNode,
     MemoryUnit,
     TableRow,
     _build_key_tree,
-    _generate_hierarchical_rows,
-    _get_memory_unit_factor,
+    _generate_rows,
+    _generate_table,
     _get_memory_usage,
-    _print_hierarchical_table,
-    _scan_keys,
+    _propagate_sizes,
     app,
 )
 
@@ -29,12 +29,16 @@ class TestApp(unittest.TestCase):
 
         # Configure the mock Redis instance
         self.mock_redis.dbsize.return_value = 5
-        self.mock_redis.scan_iter.return_value = iter([b"test:key1", b"test:key2", b"other:key1"])
 
-        # Setup the Lua script return value
+        # Setup the Lua script return value for _scan_and_measure_keys
         self.mock_script = MagicMock()
         self.mock_redis.register_script.return_value = self.mock_script
-        self.mock_script.return_value = [100, 200, 300]  # Memory usage for each key
+        # The script returns [cursor, keys, memory_values]
+        self.mock_script.return_value = [
+            0,  # cursor (0 means end of scan)
+            [b"test:key1", b"test:key2", b"other:key1"],  # keys
+            [100, 200, 300],  # memory values
+        ]
 
     def tearDown(self) -> None:
         self.mock_redis_patcher.stop()
@@ -46,59 +50,14 @@ class TestApp(unittest.TestCase):
         # Verify the result
         self.assertEqual(result.exit_code, 0)
         self.assertIn("The total number of keys: 5", result.stdout)
-        self.assertIn("Scanning keys...", result.stdout)
-        self.assertIn("Calculating memory usage...", result.stdout)
-        self.assertIn("Memory Usage Hierarchical View", result.stdout)
+        self.assertIn("Scanning and measuring keys...", result.stdout)
+        self.assertIn("Memory Usage", result.stdout)
         self.assertIn("Took", result.stdout)
 
         # Verify Redis was called correctly
         self.mock_redis.dbsize.assert_called_once()
-        self.mock_redis.scan_iter.assert_called_once()
         self.mock_redis.register_script.assert_called()
         self.mock_redis.close.assert_called()
-
-
-class TestScanKeys(unittest.TestCase):
-    """Test the _scan_keys function."""
-
-    def test_scan_all_keys(self) -> None:
-        """Test _scan_keys returns all keys when sample_size is None."""
-        # Prepare a fake redis with a scan_iter method that yields bytes keys.
-        fake_redis = MagicMock()
-        fake_redis.scan_iter.return_value = iter([b"key1", b"key2", b"key3", b"key4"])
-
-        # Call _scan_keys with sample_size=None to collect all keys.
-        result: list[str] = _scan_keys(
-            redis=fake_redis, pattern="*", count=100, sample_size=None, console=Console(), total=4
-        )
-        self.assertEqual(result, ["key1", "key2", "key3", "key4"])
-        fake_redis.scan_iter.assert_called_once_with(match="*", count=100)
-
-    def test_scan_sample_keys(self) -> None:
-        """Test _scan_keys stops scanning after reaching sample_size."""
-        # Prepare a fake redis with more keys than the sample size.
-        fake_redis = MagicMock()
-        fake_redis.scan_iter.return_value = iter([b"key1", b"key2", b"key3", b"key4", b"key5"])
-
-        # Specify sample_size so that only the first two keys should be returned.
-        result: list[str] = _scan_keys(
-            redis=fake_redis, pattern="*", count=100, sample_size=2, console=Console(), total=5
-        )
-        self.assertEqual(result, ["key1", "key2"])
-        fake_redis.scan_iter.assert_called_once_with(match="*", count=100)
-
-    def test_scan_no_keys(self) -> None:
-        """Test _scan_keys returns an empty list if no keys are yielded."""
-        # Prepare a fake redis with no keys.
-        fake_redis = MagicMock()
-        fake_redis.scan_iter.return_value = iter([])
-
-        # Call _scan_keys with a pattern that doesn't match any keys.
-        result: list[str] = _scan_keys(
-            redis=fake_redis, pattern="nonexistent", count=100, sample_size=None, console=Console()
-        )
-        self.assertEqual(result, [])
-        fake_redis.scan_iter.assert_called_once_with(match="nonexistent", count=100)
 
 
 class TestGetMemoryUsage(unittest.TestCase):
@@ -109,34 +68,71 @@ class TestGetMemoryUsage(unittest.TestCase):
         self.mock_redis = MagicMock()
         self.mock_script = MagicMock()
         self.mock_redis.register_script.return_value = self.mock_script
+        self.mock_redis.dbsize.return_value = 100  # Total keys in database
 
-    def test_get_memory_usage_basic(self) -> None:
-        """Test basic functionality of _get_memory_usage."""
-        # Setup
-        keys = ["key1", "key2", "key3"]
-        self.mock_script.return_value = [100, 200, 300]
+    def test_scan_all_keys(self) -> None:
+        """Test _get_memory_usage returns all keys when sample_size is None."""
+        # Setup script to return [cursor, keys, memory_values]
+        self.mock_script.return_value = [
+            0,  # cursor (0 means end of scan)
+            [b"key1", b"key2", b"key3", b"key4"],  # keys
+            [100, 200, 300, 400],  # memory values
+        ]
 
-        # Execute
-        result = _get_memory_usage(self.mock_redis, keys)
+        # Call _get_memory_usage with sample_size=None to collect all keys
+        memory_usage = _get_memory_usage(
+            redis=self.mock_redis,
+            pattern="*",
+            batch_size=100,
+            sample_size=None,
+            console=Console(),
+            total=100,
+        )
 
-        # Verify
+        self.assertEqual(memory_usage, {"key1": 100, "key2": 200, "key3": 300, "key4": 400})
         self.mock_redis.register_script.assert_called_once()
-        self.mock_script.assert_called_once_with(keys=keys)
-        self.assertEqual(result, {"key1": 100, "key2": 200, "key3": 300})
 
-    def test_get_memory_usage_empty_keys(self) -> None:
-        """Test _get_memory_usage with empty keys list."""
-        # Setup
-        keys = []
-        self.mock_script.return_value = []
+    def test_scan_sample_keys(self) -> None:
+        """Test _get_memory_usage stops scanning after reaching sample_size."""
+        # Setup script to return [cursor, keys, memory_values]
+        self.mock_script.return_value = [
+            0,  # cursor (0 means end of scan)
+            [b"key1", b"key2"],  # keys
+            [100, 200],  # memory values
+        ]
 
-        # Execute
-        result = _get_memory_usage(self.mock_redis, keys)
+        # Specify sample_size so that only the first two keys should be returned
+        memory_usage = _get_memory_usage(
+            redis=self.mock_redis,
+            pattern="*",
+            batch_size=100,
+            sample_size=2,
+            console=Console(),
+            total=100,
+        )
 
-        # Verify
-        self.mock_redis.register_script.assert_called_once()
-        self.mock_script.assert_called_once_with(keys=keys)
-        self.assertEqual(result, {})
+        self.assertEqual(memory_usage, {"key1": 100, "key2": 200})
+
+    def test_scan_no_keys(self) -> None:
+        """Test _get_memory_usage returns empty when no keys are found."""
+        # Setup script to return [cursor, keys, memory_values]
+        self.mock_script.return_value = [
+            0,  # cursor (0 means end of scan)
+            [],  # no keys
+            [],  # no memory values
+        ]
+
+        # Call _get_memory_usage with a pattern that doesn't match any keys
+        memory_usage = _get_memory_usage(
+            redis=self.mock_redis,
+            pattern="nonexistent",
+            batch_size=100,
+            sample_size=None,
+            console=Console(),
+            total=100,
+        )
+
+        self.assertEqual(memory_usage, {})
 
 
 class TestBuildKeyTree(unittest.TestCase):
@@ -144,153 +140,289 @@ class TestBuildKeyTree(unittest.TestCase):
 
     def test_build_key_tree_basic(self):
         """Test building a basic key tree."""
-        keys = ["users:profiles:123", "users:profiles:456", "users:logs:789", "sessions:active:111"]
-        memory_usage = {
+        memory_usage: dict[str, int | None] = {
             "users:profiles:123": 100,
             "users:profiles:456": 200,
             "users:logs:789": 300,
             "sessions:active:111": 400,
         }
 
-        root = _build_key_tree(keys, memory_usage, ":")  # type: ignore
+        root = _build_key_tree(memory_usage, ":")
 
         # Check root structure
         self.assertEqual(len(root.children), 2)  # users and sessions
         self.assertIn("users", root.children)
         self.assertIn("sessions", root.children)
+        self.assertEqual(root.size, 1000)  # Total size
 
         # Check users branch
         users_node = root.children["users"]
         self.assertEqual(users_node.name, "users:")
+        self.assertEqual(users_node.level, 1)
         self.assertEqual(len(users_node.children), 2)  # profiles and logs
         self.assertEqual(users_node.size, 600)  # 100 + 200 + 300
 
         # Check profiles branch
         profiles_node = users_node.children["profiles"]
         self.assertEqual(profiles_node.name, "profiles:")
+        self.assertEqual(profiles_node.level, 2)
         self.assertEqual(len(profiles_node.keys), 2)
         self.assertEqual(profiles_node.size, 300)  # 100 + 200
+        self.assertIn("users:profiles:123", profiles_node.keys)
+        self.assertIn("users:profiles:456", profiles_node.keys)
 
     def test_build_key_tree_with_none_values(self):
         """Test building tree with some None memory values."""
-        keys = ["a:b", "a:c", "d:e"]
-        memory_usage = {"a:b": 100, "a:c": None, "d:e": 200}
+        memory_usage: dict[str, int | None] = {"a:b": 100, "a:c": None, "d:e": 200}
 
-        root = _build_key_tree(keys, memory_usage, ":")
+        root = _build_key_tree(memory_usage, ":")
 
         # a:c should be skipped
         self.assertEqual(root.size, 300)  # 100 + 200
         self.assertEqual(len(root.children["a"].keys), 1)  # Only a:b
+        self.assertIn("a:b", root.children["a"].keys)
 
     def test_build_key_tree_no_namespace(self):
         """Test building tree with keys that have no namespace."""
-        keys = ["key1", "key2", "ns:key3"]
-        memory_usage = {"key1": 100, "key2": 200, "ns:key3": 300}
+        memory_usage: dict[str, int | None] = {"key1": 100, "key2": 200, "ns:key3": 300}
 
-        root = _build_key_tree(keys, memory_usage, ":")  # type: ignore
+        root = _build_key_tree(memory_usage, ":")
 
         # Root should have direct keys
         self.assertEqual(len(root.keys), 2)  # key1 and key2
         self.assertEqual(len(root.children), 1)  # ns
         self.assertEqual(root.size, 600)  # Total
+        self.assertIn("key1", root.keys)
+        self.assertIn("key2", root.keys)
+
+
+class TestPropagateSizes(unittest.TestCase):
+    """Test the _propagate_sizes function."""
+
+    def test_propagate_sizes(self):
+        """Test that sizes are properly propagated up the tree."""
+        # Create a simple tree structure manually
+        root = KeyNode(name="", full_path="", level=0, keys=[], size=0, sizes=[], children={})
+        child1 = KeyNode(
+            name="child1:", full_path="child1", level=1, keys=[], size=0, sizes=[], children={}
+        )
+        child2 = KeyNode(
+            name="child2:", full_path="child2", level=1, keys=[], size=0, sizes=[], children={}
+        )
+        grandchild = KeyNode(
+            name="gc:", full_path="child1:gc", level=2, keys=[], size=0, sizes=[], children={}
+        )
+
+        # Set up relationships
+        root.children = {"child1": child1, "child2": child2}
+        child1.children = {"gc": grandchild}
+
+        # Add some keys with sizes
+        grandchild.keys = ["child1:gc:key1"]
+        grandchild.sizes = [100]
+        grandchild.size = 100  # Initial size
+        child1.keys = ["child1:key1"]
+        child1.sizes = [200]
+        child1.size = 200  # Initial size
+        child2.keys = ["child2:key1", "child2:key2"]
+        child2.sizes = [300, 400]
+        child2.size = 700  # Initial size
+
+        # Propagate sizes
+        _propagate_sizes(root)
+
+        # Check sizes after propagation
+        self.assertEqual(grandchild.size, 100)
+        self.assertEqual(child1.size, 300)  # 100 + 200
+        self.assertEqual(child2.size, 700)  # 300 + 400
+        self.assertEqual(root.size, 1000)  # 300 + 700
 
 
 class TestGetMemoryUnitFactor(unittest.TestCase):
-    """Test the _get_memory_unit_factor function."""
+    """Test the MemoryUnit.get_factor method."""
 
     def test_memory_unit_factors(self) -> None:
         """Test the conversion factors for all memory units."""
-        self.assertEqual(_get_memory_unit_factor(MemoryUnit.B), 1)
-        self.assertEqual(_get_memory_unit_factor(MemoryUnit.KB), 1024)
-        self.assertEqual(_get_memory_unit_factor(MemoryUnit.MB), 1024 * 1024)
-        self.assertEqual(_get_memory_unit_factor(MemoryUnit.GB), 1024 * 1024 * 1024)
-
-    def test_invalid_unit(self) -> None:
-        """Test that an invalid memory unit raises a ValueError."""
-        with self.assertRaises(ValueError):
-            _get_memory_unit_factor("invalid_unit")  # type: ignore
+        self.assertEqual(MemoryUnit.B.get_factor(), 1)
+        self.assertEqual(MemoryUnit.KB.get_factor(), 1024)
+        self.assertEqual(MemoryUnit.MB.get_factor(), 1024 * 1024)
+        self.assertEqual(MemoryUnit.GB.get_factor(), 1024 * 1024 * 1024)
 
 
-class TestGenerateHierarchicalRows(unittest.TestCase):
-    """Test the _generate_hierarchical_rows function."""
+class TestGenerateeRows(unittest.TestCase):
+    """Test the _generate_rows function."""
 
-    def test_generate_hierarchical_rows(self):
+    def test_generate_rows(self):
         """Test generating rows from a key tree."""
         # Build a simple tree
-        keys = ["users:profiles:123", "users:logs:456", "sessions:789"]
-        memory_usage = {"users:profiles:123": 1000, "users:logs:456": 2000, "sessions:789": 3000}
+        memory_usage: dict[str, int | None] = {
+            "users:profiles:123": 1000,
+            "users:logs:456": 2000,
+            "sessions:789": 3000,
+        }
 
-        root = _build_key_tree(keys, memory_usage, ":")  # type: ignore
-        rows, total_row = _generate_hierarchical_rows(root, memory_usage, MemoryUnit.B, None)  # type: ignore
+        root = _build_key_tree(memory_usage, ":")
+        rows, total_row = _generate_rows(root, memory_usage, MemoryUnit.B, None)
 
-        # Check that we have the right number of rows
-        # Should have: sessions:, users:, profiles:, users:profiles:123, logs:, users:logs:456, sessions:789
-        self.assertEqual(len(rows), 7)
+        # Check that we have the right structure
+        # Should have hierarchical rows with proper indentation
+        key_texts = [row.key.strip() for row in rows]
+
+        # Check for namespace rows
+        self.assertIn("sessions:", key_texts)
+        self.assertIn("users:", key_texts)
+
+        # Check for indented rows (they should have spaces in the key field)
+        indented_rows = [row for row in rows if row.key.startswith("  ")]
+        self.assertGreater(len(indented_rows), 0)
 
         # Check total row
         self.assertEqual(total_row.count, "3")
         self.assertEqual(total_row.size, "6000")
         self.assertEqual(total_row.percentage, "100.00")
 
-    def test_generate_hierarchical_rows_with_top(self):
-        """Test generating rows with top limit."""
+    def test_generate_rows_with_max_leaves(self):
+        """Test generating rows with max_leaves limit."""
         # Build a tree with many keys
-        keys = [f"ns:key{i}" for i in range(10)]
-        memory_usage = {k: 100 * (i + 1) for i, k in enumerate(keys)}
+        memory_usage: dict[str, int | None] = {f"ns:key{i}": 100 * (i + 1) for i in range(10)}
 
-        root = _build_key_tree(keys, memory_usage, ":")  # type: ignore
-        rows, total_row = _generate_hierarchical_rows(root, memory_usage, MemoryUnit.B, top=3)  # type: ignore
+        root = _build_key_tree(memory_usage, ":")
+        rows, total_row = _generate_rows(root, memory_usage, MemoryUnit.B, max_leaves=3)
 
-        # Should have ns: row, top 3 keys, and "... more keys..." row
+        # Should have "... more keys ..." row
         found_more = any("... " in row.key and "more keys" in row.key for row in rows)
         self.assertTrue(found_more)
 
+        # Count actual key rows (not namespace or ... rows)
+        key_rows = [
+            row for row in rows if not row.key.strip().endswith(":") and "..." not in row.key
+        ]
+        self.assertEqual(len(key_rows), 3)  # Should have exactly max_leaves 3 keys
 
-class TestPrintHierarchicalTable(unittest.TestCase):
-    """Test the _print_hierarchical_table function."""
 
-    def test_print_hierarchical_table(self) -> None:
-        """
-        Sanity check for _print_hierarchical_table.
-        NOTE Verifying console output is flaky as results may vary based on the terminal width.
-        """
-        _print_hierarchical_table(
-            title="Test Hierarchical Memory Usage",
-            rows=[
-                TableRow(
-                    key="users:",
-                    count="10",
-                    size="1000",
-                    avg_size="100",
-                    min_size="50",
-                    max_size="150",
-                    percentage="50.00",
-                    level=1,
-                ),
-                TableRow(
-                    key="  profiles:",
-                    count="5",
-                    size="500",
-                    avg_size="100",
-                    min_size="80",
-                    max_size="120",
-                    percentage="25.00",
-                    level=2,
-                ),
-            ],
-            total_row=TableRow(
-                key="Total Keys Scanned",
-                count="20",
-                size="2000",
+class TestGenerateTable(unittest.TestCase):
+    """Test the _generate_table function."""
+
+    def test_generate_table_basic(self) -> None:
+        """Test basic table generation with simple rows."""
+        rows = [
+            TableRow(
+                key="users:",
+                count="10",
+                size="1000",
                 avg_size="100",
                 min_size="50",
                 max_size="150",
-                percentage="100.00",
-                level=0,
+                percentage="50.00",
+                level=1,
             ),
-            memory_unit=MemoryUnit.B,
-            console=Console(),
+            TableRow(
+                key="  profiles:",
+                count="5",
+                size="500",
+                avg_size="100",
+                min_size="80",
+                max_size="120",
+                percentage="25.00",
+                level=2,
+            ),
+        ]
+
+        total_row = TableRow(
+            key="Total Keys Scanned",
+            count="20",
+            size="2000",
+            avg_size="100",
+            min_size="50",
+            max_size="150",
+            percentage="100.00",
+            level=0,
         )
+
+        table = _generate_table(
+            title="Test Memory Usage",
+            rows=rows,
+            total_row=total_row,
+            memory_unit=MemoryUnit.B,
+        )
+
+        # Check that table is created successfully
+        self.assertIsNotNone(table)
+        self.assertEqual(table.title, "Test Memory Usage")
+        self.assertEqual(len(table.columns), 7)  # 7 columns expected
+
+        # Check column headers
+        column_headers = [col.header for col in table.columns]
+        self.assertIn("Key", column_headers)
+        self.assertIn("Count", column_headers)
+        self.assertIn("Size (B)", column_headers)
+        self.assertIn("Avg Size (B)", column_headers)
+        self.assertIn("Min Size (B)", column_headers)
+        self.assertIn("Max Size (B)", column_headers)
+        self.assertIn("Memory Usage (%)", column_headers)
+
+    def test_generate_table_different_memory_units(self) -> None:
+        """Test table generation with different memory units."""
+        rows = [
+            TableRow(
+                key="test:key",
+                count="1",
+                size="1.50",
+                avg_size="1.50",
+                min_size="1.50",
+                max_size="1.50",
+                percentage="100.00",
+                level=1,
+            ),
+        ]
+
+        total_row = TableRow(
+            key="Total Keys Scanned",
+            count="1",
+            size="1.50",
+            avg_size="1.50",
+            min_size="1.50",
+            max_size="1.50",
+            percentage="100.00",
+            level=0,
+        )
+
+        # Test with KB unit
+        table_kb = _generate_table(
+            title="Test KB",
+            rows=rows,
+            total_row=total_row,
+            memory_unit=MemoryUnit.KB,
+        )
+
+        column_headers = [col.header for col in table_kb.columns]
+        self.assertIn("Size (KB)", column_headers)
+        self.assertIn("Avg Size (KB)", column_headers)
+        self.assertIn("Min Size (KB)", column_headers)
+        self.assertIn("Max Size (KB)", column_headers)
+
+        # Test with MB unit
+        table_mb = _generate_table(
+            title="Test MB",
+            rows=rows,
+            total_row=total_row,
+            memory_unit=MemoryUnit.MB,
+        )
+
+        column_headers = [col.header for col in table_mb.columns]
+        self.assertIn("Size (MB)", column_headers)
+        self.assertIn("Avg Size (MB)", column_headers)
+
+        # Test with GB unit
+        table_gb = _generate_table(
+            title="Test GB",
+            rows=rows,
+            total_row=total_row,
+            memory_unit=MemoryUnit.GB,
+        )
+
+        column_headers = [col.header for col in table_gb.columns]
+        self.assertIn("Size (GB)", column_headers)
 
 
 if __name__ == "__main__":

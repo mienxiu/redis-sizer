@@ -24,6 +24,21 @@ class MemoryUnit(str, Enum):
     MB = "MB"
     GB = "GB"
 
+    def get_factor(self) -> int:
+        """
+        Get the conversion factor for the memory unit.
+        """
+        if self == MemoryUnit.B:
+            return 1
+        elif self == MemoryUnit.KB:
+            return 1024
+        elif self == MemoryUnit.MB:
+            return 1024 * 1024
+        elif self == MemoryUnit.GB:
+            return 1024 * 1024 * 1024
+        else:
+            raise ValueError("Invalid value for memory_unit. Use B, KB, MB, or GB.")
+
 
 @dataclass
 class TableRow:
@@ -39,6 +54,7 @@ class TableRow:
     max_size: str
     percentage: str
     level: int = 0  # Add level for indentation
+    is_truncation_row: bool = False  # dimmed if True
 
 
 @dataclass
@@ -47,13 +63,13 @@ class KeyNode:
     Represent a node in the key hierarchy tree.
     """
 
-    name: str
-    full_path: str
-    level: int
-    keys: list[str]
-    size: int
-    sizes: list[int]
-    children: dict[str, "KeyNode"]
+    name: str  # The display name for this node
+    full_path: str  # The full path from root to this node
+    level: int  # The depth level in the hierarchy (0 for root, 1 for first level, etc.)
+    keys: list[str]  # List of actual Redis keys that belong directly to this node
+    size: int  # Total memory size of all keys in this subtree (including children)
+    sizes: list[int]  # List of individual memory sizes for statistics (e.g., min, max, avg)
+    children: dict[str, "KeyNode"]  # Child nodes in the hierarchy, keyed by their name
 
 
 @app.command()
@@ -72,11 +88,12 @@ def analyze(
     memory_unit: Annotated[
         MemoryUnit, typer.Option(help="Memory unit for display in result table")
     ] = MemoryUnit.B,
-    top: Annotated[
-        int | None, typer.Option(help="Maximum number of rows to display in result table")
+    max_leaves: Annotated[
+        int | None, typer.Option(help="Maximum number of leaf keys to display per namespace")
     ] = 5,
-    scan_count: Annotated[int, typer.Option(help="COUNT option for scanning keys")] = 1000,
-    batch_size: Annotated[int, typer.Option(help="Batch size for calculating memory usage")] = 1000,
+    batch_size: Annotated[
+        int, typer.Option(help="Batch size for scanning and calculating memory usage")
+    ] = 1000,
 ):
     """
     Analyze memory usage across keys in a Redis database and display the results in a table.
@@ -97,128 +114,136 @@ def analyze(
         socket_connect_timeout=socket_connect_timeout,
     )
 
-    # Get the total number of keys in the database
     try:
+        # Get the total number of keys in the database
         total_size: int = redis.dbsize()  # type: ignore
+        if total_size == 0:
+            console.print("[yellow]No keys found in the database.[/yellow]")
+            redis.close()
+            return
+        console.print(f"The total number of keys: {total_size}")
+        memory_usage = _get_memory_usage(
+            redis=redis,
+            pattern=pattern,
+            batch_size=batch_size,
+            sample_size=sample_size,
+            console=console,
+            total=total_size,
+        )
     except RedisError as error:
         console.print(f"[red]Error occured: {error}[/red]")
         redis.close()
         exit(1)
-
-    # If the total size is 0, stop the process
-    if total_size == 0:
-        console.print("[yellow]No keys found in the database.[/yellow]")
-        redis.close()
-        return
-
-    console.print(f"The total number of keys: {total_size}")
-
-    # Scan the keys in the database
-    keys = _scan_keys(
-        redis=redis,
-        pattern=pattern,
-        count=scan_count,
-        sample_size=sample_size,
-        console=console,
-        total=total_size,
-    )
-    if not keys:
-        console.print(f"[yellow]No keys found matching the pattern: {pattern}[/yellow]")
-        redis.close()
-        return
-
-    # Get memory usage for each key (in batches)
-    memory_usage_by_key: dict[str, int | None] = {}  # key -> memory usage
-    for i in track(
-        range(0, len(keys), batch_size),
-        description="Calculating memory usage...",
-        console=console,
-    ):
-        batch = keys[i : i + batch_size]
-        try:
-            memory_usage_by_key.update(_get_memory_usage(redis=redis, keys=batch))
-        except RedisError as error:
-            console.print(f"[red]Error occured: {error}[/red]")
-            redis.close()
-            exit(2)
-
     redis.close()
 
-    # Build hierarchical tree structure
-    root = _build_key_tree(keys, memory_usage_by_key, namespace_separator)
-
-    if not root.children and not root.keys:
-        console.print("[yellow]No valid keys found. The scanned keys might have expired.[/yellow]")
+    if not memory_usage:
+        console.print(f"[yellow]No keys found matching the pattern: {pattern}[/yellow]")
         return
 
-    # Generate table rows from tree
-    rows, total_row = _generate_hierarchical_rows(root, memory_usage_by_key, memory_unit, top)
-
-    # Print the hierarchical table
-    _print_hierarchical_table(
-        title="Memory Usage Hierarchical View",
-        rows=rows,
-        total_row=total_row,
-        memory_unit=memory_unit,
-        console=console,
-    )
+    root = _build_key_tree(memory_usage, namespace_separator)
+    rows, total_row = _generate_rows(root, memory_usage, memory_unit, max_leaves)
+    table = _generate_table("Memory Usage", rows=rows, total_row=total_row, memory_unit=memory_unit)
+    console.print(table)
 
     console.print(f"Took {(time.time() - start_time):.2f} seconds")
 
 
-def _scan_keys(
+def _get_memory_usage(
     redis: Redis,
     pattern: str,
-    count: int,
+    batch_size: int,
     sample_size: int | None,
     console: Console,
     total: int | None = None,
-) -> list[str]:
+) -> dict[str, int | None]:
     """
-    Scan keys in the Redis database using the given pattern.
-    If sample_size is None, perform a full iteration and estimate progress using total.
+    Scan keys and get their memory usage using Lua script.
+    Returns a dictionary mapping keys to their memory usage.
     """
-    keys = []
-    for key in track(
-        redis.scan_iter(match=pattern, count=count),
-        description="Scanning keys...",
-        total=sample_size or total,
+    # Lua script that combines SCAN and MEMORY USAGE
+    script = """
+    local cursor = ARGV[1]
+    local pattern = ARGV[2]
+    local batch_size = tonumber(ARGV[3])
+    
+    -- Perform SCAN
+    local scan_result = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', batch_size)
+    local new_cursor = scan_result[1]
+    local keys = scan_result[2]
+    
+    -- Get memory usage for each key
+    local memory_usage = {}
+    for i, key in ipairs(keys) do
+        -- SAMPLES 0 means sampling the all of the nested values
+        memory_usage[i] = redis.call('MEMORY', 'USAGE', key, 'SAMPLES', 0)
+    end
+    
+    return {new_cursor, keys, memory_usage}
+    """
+    get_keys_and_memory = redis.register_script(script)
+
+    # Progress tracking
+    progress = track(
+        range(sample_size or total or 0),
+        description="Scanning and measuring keys...",
         console=console,
         show_speed=False,
-    ):
-        keys.append(key.decode())
-        if sample_size and sample_size <= len(keys):
+    )
+    progress_iter = iter(progress)
+    next(progress_iter)  # Start the progress iterator
+
+    memory_usage = {}
+    cursor = 0
+    collected_count = 0
+    while True:
+        # Call Lua script
+        result: list = get_keys_and_memory(args=[cursor, pattern, batch_size])  # type: ignore
+        new_cursor = int(result[0])
+        keys = [k.decode() if isinstance(k, bytes) else k for k in result[1]]
+        memory_values = result[2]
+
+        # Sanity check
+        assert len(keys) == len(memory_values), "Keys and memory values length mismatch"
+
+        # Process results
+        for key, memory_value in zip(keys, memory_values):
+            if memory_value is not None:
+                memory_usage[key] = memory_value
+                collected_count += 1
+
+                # Update progress
+                try:
+                    next(progress_iter)
+                except StopIteration:
+                    pass
+
+        # Check if we've collected enough samples
+        if sample_size and collected_count >= sample_size:
+            # Trim to exact sample size if needed
+            all_keys = list(memory_usage.keys())[:sample_size]
+            memory_usage = {k: memory_usage[k] for k in all_keys}
             break
-    return keys
+
+        # Check if scan is complete
+        if new_cursor == 0:
+            break
+
+        cursor = new_cursor
+
+    progress.close()  # type: ignore
+
+    return memory_usage
 
 
-def _get_memory_usage(redis: Redis, keys: list[str]) -> dict[str, int | None]:
+def _build_key_tree(memory_usage: dict[str, int | None], separator: str) -> KeyNode:
     """
-    Get memory usage for a list of keys using Lua script.
-    If the key doesn't exist (expired), memory usage is None.
-    """
-    script = """
-    local result = {}
-    for i, key in ipairs(KEYS) do
-        result[i] = redis.call('MEMORY', 'USAGE', key, 'SAMPLES', 0)
-    end
-    return result
-    """
-    func = redis.register_script(script)
-    return dict(zip(keys, func(keys=keys)))  # type: ignore
-
-
-def _build_key_tree(
-    keys: list[str], memory_usage_by_key: dict[str, int | None], separator: str
-) -> KeyNode:
-    """
-    Build a hierarchical tree structure from keys.
+    Build a hierarchical tree structure from the memory usage dictionary.
     """
     root = KeyNode(name="", full_path="", level=0, keys=[], size=0, sizes=[], children={})
 
-    for key in keys:
-        memory_usage = memory_usage_by_key.get(key)
-        if memory_usage is None:
+    for key in memory_usage.keys():
+        size = memory_usage.get(key)
+        if size is None:
             continue
 
         parts = key.split(separator)
@@ -244,13 +269,13 @@ def _build_key_tree(
         if len(parts) > 1:
             # Key has namespace, add to parent
             current_node.keys.append(key)
-            current_node.size += memory_usage
-            current_node.sizes.append(memory_usage)
+            current_node.size += size
+            current_node.sizes.append(size)
         else:
             # Key has no namespace, add to root
             root.keys.append(key)
-            root.size += memory_usage
-            root.sizes.append(memory_usage)
+            root.size += size
+            root.sizes.append(size)
 
     # Propagate sizes up the tree
     _propagate_sizes(root)
@@ -276,17 +301,17 @@ def _propagate_sizes(node: KeyNode) -> tuple[int, list[int]]:
     return total_size, all_sizes
 
 
-def _generate_hierarchical_rows(
+def _generate_rows(
     root: KeyNode,
-    memory_usage_by_key: dict[str, int | None],
+    memory_usage: dict[str, int | None],
     memory_unit: MemoryUnit,
-    top: int | None,
+    max_leaves: int | None,
 ) -> tuple[list[TableRow], TableRow]:
     """
     Generate table rows from the tree structure with proper indentation.
     """
     rows: list[TableRow] = []
-    factor = _get_memory_unit_factor(memory_unit)
+    factor = memory_unit.get_factor()
 
     # Track overall statistics
     overall_min: int | None = None
@@ -307,13 +332,13 @@ def _generate_hierarchical_rows(
         # Handle direct keys at this level
         if node.keys:
             # Sort keys by size
-            key_sizes = [(k, memory_usage_by_key.get(k, 0)) for k in node.keys]
+            key_sizes = [(k, memory_usage.get(k, 0)) for k in node.keys]
             key_sizes.sort(key=lambda x: 0 if x[1] is None else x[1], reverse=True)
 
-            # Apply top limit only at leaf level
-            if is_last_level and top and len(key_sizes) > top:
-                displayed_keys = key_sizes[:top]
-                hidden_count = len(key_sizes) - top
+            # Apply max_leaves limit only at leaf level
+            if is_last_level and max_leaves and len(key_sizes) > max_leaves:
+                displayed_keys = key_sizes[:max_leaves]
+                hidden_count = len(key_sizes) - max_leaves
             else:
                 displayed_keys = key_sizes
                 hidden_count = 0
@@ -324,22 +349,22 @@ def _generate_hierarchical_rows(
                     continue
 
                 display_key = "  " * node.level + key
-                size_converted = size or 0 / factor
+                size_converted = (size or 0) / factor
                 display_size = (
                     f"{size_converted:.2f}"
                     if memory_unit != MemoryUnit.B
                     else f"{int(size_converted)}"
                 )
-                percentage = (size or 0 / parent_size * 100) if parent_size else 0
+                percentage = ((size or 0) / parent_size * 100) if parent_size else 0
 
                 rows.append(
                     TableRow(
                         key=display_key,
                         count="1",
                         size=display_size,
-                        avg_size=display_size,
-                        min_size=display_size,
-                        max_size=display_size,
+                        avg_size="",
+                        min_size="",
+                        max_size="",
                         percentage=f"{percentage:.2f}",
                         level=node.level,
                     )
@@ -356,6 +381,7 @@ def _generate_hierarchical_rows(
                         max_size="",
                         percentage="",
                         level=node.level,
+                        is_truncation_row=True,
                     )
                 )
 
@@ -448,33 +474,15 @@ def _generate_hierarchical_rows(
     return rows, total_row
 
 
-def _get_memory_unit_factor(memory_unit: MemoryUnit) -> int:
+def _generate_table(
+    title: str, rows: list[TableRow], total_row: TableRow, memory_unit: MemoryUnit
+) -> Table:
     """
-    Get the conversion factor for the specified memory unit.
-    """
-    if memory_unit == MemoryUnit.B:
-        return 1
-    elif memory_unit == MemoryUnit.KB:
-        return 1024
-    elif memory_unit == MemoryUnit.MB:
-        return 1024 * 1024
-    elif memory_unit == MemoryUnit.GB:
-        return 1024 * 1024 * 1024
-    else:
-        raise ValueError("Invalid value for memory_unit. Use B, KB, MB, or GB.")
-
-
-def _print_hierarchical_table(
-    title: str,
-    rows: list[TableRow],
-    total_row: TableRow,
-    memory_unit: MemoryUnit,
-    console: Console,
-):
-    """
-    Print hierarchical table with indented keys.
+    Generate a renderable table object with the given rows and total row.
     """
     table: Table = Table(title=title, box=box.MINIMAL)
+
+    # Header row
     table.add_column("Key", justify="left")
     table.add_column("Count", justify="right", style="green")
     table.add_column(f"Size ({memory_unit.upper()})", justify="right", style="magenta")
@@ -483,13 +491,12 @@ def _print_hierarchical_table(
     table.add_column(f"Max Size ({memory_unit.upper()})", justify="right", style="red")
     table.add_column("Memory Usage (%)", justify="right", style="cyan")
 
+    # Data rows
     for row in rows:
         # Apply style based on indentation level
         style = None
-        if "..." in row.key:
+        if row.is_truncation_row:
             style = "dim"
-        elif row.level == 1:
-            style = "bold"
 
         table.add_row(
             row.key,
@@ -502,6 +509,7 @@ def _print_hierarchical_table(
             style=style,
         )
 
+    # Summary row
     table.add_section()
     table.add_row(
         total_row.key,
@@ -513,7 +521,8 @@ def _print_hierarchical_table(
         total_row.percentage,
         style="bold",
     )
-    console.print(table)
+
+    return table
 
 
 if __name__ == "__main__":

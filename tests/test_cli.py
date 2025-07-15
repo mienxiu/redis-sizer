@@ -36,7 +36,7 @@ class TestApp(unittest.TestCase):
         # The script returns [cursor, keys, memory_values]
         self.mock_script.return_value = [
             0,  # cursor (0 means end of scan)
-            [b"test:key1", b"test:key2", b"other:key1"],  # keys
+            ["test:key1", "test:key2", "other:key1"],  # keys
             [100, 200, 300],  # memory values
         ]
 
@@ -75,7 +75,7 @@ class TestGetMemoryUsage(unittest.TestCase):
         # Setup script to return [cursor, keys, memory_values]
         self.mock_script.return_value = [
             0,  # cursor (0 means end of scan)
-            [b"key1", b"key2", b"key3", b"key4"],  # keys
+            ["key1", "key2", "key3", "key4"],  # keys
             [100, 200, 300, 400],  # memory values
         ]
 
@@ -85,8 +85,8 @@ class TestGetMemoryUsage(unittest.TestCase):
             pattern="*",
             batch_size=100,
             sample_size=None,
-            console=Console(),
             total=100,
+            console=Console(),
         )
 
         self.assertEqual(memory_usage, {"key1": 100, "key2": 200, "key3": 300, "key4": 400})
@@ -97,7 +97,7 @@ class TestGetMemoryUsage(unittest.TestCase):
         # Setup script to return [cursor, keys, memory_values]
         self.mock_script.return_value = [
             0,  # cursor (0 means end of scan)
-            [b"key1", b"key2"],  # keys
+            ["key1", "key2"],  # keys
             [100, 200],  # memory values
         ]
 
@@ -107,8 +107,8 @@ class TestGetMemoryUsage(unittest.TestCase):
             pattern="*",
             batch_size=100,
             sample_size=2,
-            console=Console(),
             total=100,
+            console=Console(),
         )
 
         self.assertEqual(memory_usage, {"key1": 100, "key2": 200})
@@ -128,8 +128,8 @@ class TestGetMemoryUsage(unittest.TestCase):
             pattern="nonexistent",
             batch_size=100,
             sample_size=None,
-            console=Console(),
             total=100,
+            console=Console(),
         )
 
         self.assertEqual(memory_usage, {})
@@ -140,7 +140,7 @@ class TestBuildKeyTree(unittest.TestCase):
 
     def test_build_key_tree_basic(self):
         """Test building a basic key tree."""
-        memory_usage: dict[str, int | None] = {
+        memory_usage: dict[str, int] = {
             "users:profiles:123": 100,
             "users:profiles:456": 200,
             "users:logs:789": 300,
@@ -171,20 +171,9 @@ class TestBuildKeyTree(unittest.TestCase):
         self.assertIn("users:profiles:123", profiles_node.keys)
         self.assertIn("users:profiles:456", profiles_node.keys)
 
-    def test_build_key_tree_with_none_values(self):
-        """Test building tree with some None memory values."""
-        memory_usage: dict[str, int | None] = {"a:b": 100, "a:c": None, "d:e": 200}
-
-        root = _build_key_tree(memory_usage, ":")
-
-        # a:c should be skipped
-        self.assertEqual(root.size, 300)  # 100 + 200
-        self.assertEqual(len(root.children["a"].keys), 1)  # Only a:b
-        self.assertIn("a:b", root.children["a"].keys)
-
     def test_build_key_tree_no_namespace(self):
         """Test building tree with keys that have no namespace."""
-        memory_usage: dict[str, int | None] = {"key1": 100, "key2": 200, "ns:key3": 300}
+        memory_usage: dict[str, int] = {"key1": 100, "key2": 200, "ns:key3": 300}
 
         root = _build_key_tree(memory_usage, ":")
 
@@ -255,7 +244,7 @@ class TestGenerateeRows(unittest.TestCase):
     def test_generate_rows(self):
         """Test generating rows from a key tree."""
         # Build a simple tree
-        memory_usage: dict[str, int | None] = {
+        memory_usage: dict[str, int] = {
             "users:profiles:123": 1000,
             "users:logs:456": 2000,
             "sessions:789": 3000,
@@ -284,7 +273,7 @@ class TestGenerateeRows(unittest.TestCase):
     def test_generate_rows_with_max_leaves(self):
         """Test generating rows with max_leaves limit."""
         # Build a tree with many keys
-        memory_usage: dict[str, int | None] = {f"ns:key{i}": 100 * (i + 1) for i in range(10)}
+        memory_usage: dict[str, int] = {f"ns:key{i}": 100 * (i + 1) for i in range(10)}
 
         root = _build_key_tree(memory_usage, ":")
         rows, total_row = _generate_rows(root, memory_usage, MemoryUnit.B, max_leaves=3)

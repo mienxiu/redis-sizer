@@ -8,7 +8,7 @@ from redis import Redis
 from redis.exceptions import RedisError
 from rich import box
 from rich.console import Console
-from rich.progress import track
+from rich.progress import Progress
 from rich.table import Table
 
 app = typer.Typer()
@@ -112,6 +112,7 @@ def analyze(
         password=password,
         socket_timeout=socket_timeout,
         socket_connect_timeout=socket_connect_timeout,
+        decode_responses=True,
     )
 
     try:
@@ -119,7 +120,6 @@ def analyze(
         total_size: int = redis.dbsize()  # type: ignore
         if total_size == 0:
             console.print("[yellow]No keys found in the database.[/yellow]")
-            redis.close()
             return
         console.print(f"The total number of keys: {total_size}")
         memory_usage = _get_memory_usage(
@@ -127,18 +127,17 @@ def analyze(
             pattern=pattern,
             batch_size=batch_size,
             sample_size=sample_size,
-            console=console,
             total=total_size,
+            console=console,
         )
+        if not memory_usage:
+            console.print(f"[yellow]No keys found matching the pattern: {pattern}[/yellow]")
+            return
     except RedisError as error:
         console.print(f"[red]Error occured: {error}[/red]")
-        redis.close()
         exit(1)
-    redis.close()
-
-    if not memory_usage:
-        console.print(f"[yellow]No keys found matching the pattern: {pattern}[/yellow]")
-        return
+    finally:
+        redis.close()
 
     root = _build_key_tree(memory_usage, namespace_separator)
     rows, total_row = _generate_rows(root, memory_usage, memory_unit, max_leaves)
@@ -153,9 +152,9 @@ def _get_memory_usage(
     pattern: str,
     batch_size: int,
     sample_size: int | None,
+    total: int,
     console: Console,
-    total: int | None = None,
-) -> dict[str, int | None]:
+) -> dict[str, int]:
     """
     Scan keys and get their memory usage using Lua script.
     Returns a dictionary mapping keys to their memory usage.
@@ -182,70 +181,58 @@ def _get_memory_usage(
     """
     get_keys_and_memory = redis.register_script(script)
 
-    # Progress tracking
-    progress = track(
-        range(sample_size or total or 0),
-        description="Scanning and measuring keys...",
-        console=console,
-        show_speed=False,
-    )
-    progress_iter = iter(progress)
-    next(progress_iter)  # Start the progress iterator
-
-    memory_usage = {}
     cursor = 0
+    memory_usage = {}
     collected_count = 0
-    while True:
-        # Call Lua script
-        result: list = get_keys_and_memory(args=[cursor, pattern, batch_size])  # type: ignore
-        new_cursor = int(result[0])
-        keys = [k.decode() if isinstance(k, bytes) else k for k in result[1]]
-        memory_values = result[2]
 
-        # Sanity check
-        assert len(keys) == len(memory_values), "Keys and memory values length mismatch"
+    with Progress(console=console) as progress:
+        task = progress.add_task("Scanning and measuring keys...", total=sample_size or total)
 
-        # Process results
-        for key, memory_value in zip(keys, memory_values):
-            if memory_value is not None:
-                memory_usage[key] = memory_value
-                collected_count += 1
+        while True:
+            # Call Lua script
+            result: list = get_keys_and_memory(args=[cursor, pattern, batch_size])  # type: ignore
+            new_cursor = int(result[0])
+            keys = result[1]
+            memory_values = result[2]
 
-                # Update progress
-                try:
-                    next(progress_iter)
-                except StopIteration:
-                    pass
+            # Sanity check
+            assert len(keys) == len(memory_values), "Keys and memory values length mismatch"
 
-        # Check if we've collected enough samples
-        if sample_size and collected_count >= sample_size:
-            # Trim to exact sample size if needed
-            all_keys = list(memory_usage.keys())[:sample_size]
-            memory_usage = {k: memory_usage[k] for k in all_keys}
-            break
+            # Update memory_usage dictionary
+            batch_processed = 0
+            for key, memory_value in zip(keys, memory_values):
+                if memory_value is not None:
+                    memory_usage[key] = memory_value
+                    collected_count += 1
+                    batch_processed += 1
 
-        # Check if scan is complete
-        if new_cursor == 0:
-            break
+            # Update progress bar by the number of keys processed in this batch
+            if batch_processed > 0:
+                progress.update(task, advance=batch_processed)
 
-        cursor = new_cursor
+            # Check if we've collected enough samples
+            if sample_size and collected_count >= sample_size:
+                # Trim to exact sample size
+                all_keys = list(memory_usage.keys())[:sample_size]
+                memory_usage = {k: memory_usage[k] for k in all_keys}
+                break
 
-    progress.close()  # type: ignore
+            # Check if scan is complete
+            if new_cursor == 0:
+                break
+
+            cursor = new_cursor
 
     return memory_usage
 
 
-def _build_key_tree(memory_usage: dict[str, int | None], separator: str) -> KeyNode:
+def _build_key_tree(memory_usage: dict[str, int], separator: str) -> KeyNode:
     """
     Build a hierarchical tree structure from the memory usage dictionary.
     """
     root = KeyNode(name="", full_path="", level=0, keys=[], size=0, sizes=[], children={})
 
-    for key in memory_usage.keys():
-        size = memory_usage.get(key)
-        if size is None:
-            continue
-
+    for key, size in memory_usage.items():
         parts = key.split(separator)
         current_node = root
         current_path = ""
@@ -303,7 +290,7 @@ def _propagate_sizes(node: KeyNode) -> tuple[int, list[int]]:
 
 def _generate_rows(
     root: KeyNode,
-    memory_usage: dict[str, int | None],
+    memory_usage: dict[str, int],
     memory_unit: MemoryUnit,
     max_leaves: int | None,
 ) -> tuple[list[TableRow], TableRow]:
@@ -332,7 +319,7 @@ def _generate_rows(
         # Handle direct keys at this level
         if node.keys:
             # Sort keys by size
-            key_sizes = [(k, memory_usage.get(k, 0)) for k in node.keys]
+            key_sizes = [(k, memory_usage[k]) for k in node.keys]
             key_sizes.sort(key=lambda x: 0 if x[1] is None else x[1], reverse=True)
 
             # Apply max_leaves limit only at leaf level

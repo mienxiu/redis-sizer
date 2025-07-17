@@ -2,7 +2,7 @@
 
 A simple command-line tool for analyzing memory usage across keys in a Redis database.
 
-![Sample output](https://raw.githubusercontent.com/mienxiu/redis-sizer/refs/heads/main/docs/sample_output.png)
+![Sample output](https://raw.githubusercontent.com/mienxiu/redis-sizer/refs/heads/main/docs/sample_output.jpg)
 
 redis-sizer can help with the following problems:
 - Optimize caching strategy.
@@ -35,40 +35,32 @@ Options:
 - `--pattern`: Pattern to filter keys [default: *]
 - `--sample-size`: Number of keys to sample [default: None]
 - `--namespace-separator`: Separator for key namespaces [default: :]
-- `--namespace-level`: Maximum number of namespace levels to aggregate keys by. 0 means no aggregation. [default: 0]
 - `--memory-unit`: Memory unit for display in result table [default: B]
-- `--top`: Maximum number of rows to display in result table [default: 10]
-- `--scan-count`: `COUNT` option for scanning keys [default: 1000]
-- `--batch-size`: Batch size for calculating memory usage [default: 1000]
+- `--max-leaves`: Maximum number of leaf keys to display per namespace [default: 5]
+- `--batch-size`: Batch size for scanning and calculating memory usage [default: 1000]
 
 ### Aggregating Memory Usage by Key Groups
 
 Many applications using Redis adopt hierarchical key naming conventions.
-redis-sizer leverages this structure to aggregate and analyze memory usage, helping you quickly identify which key groups consume the most memory.
-
-For example, if your keys follow a colon-delimited format (e.g., `users:profiles:...`, `users:logs:...`, `sessions:active:...`), the hierarchy can be visualized like a tree structure:
+For example, if your keys follow a colon-delimited format (e.g., `users:logs:...`, `users:profiles:...`), they can be visualized as a nested or tree-like structure:
 
 ```
 DB
 ├── users:
-│   ├── profiles:
-│   │   ├── ...
-│   └── logs:
-│       ├── ...
-├── sessions:
-│   └── active:
+│   ├── logs:
+│   │   └── ...
+│   └── profiles:
+│       └── ...
 ...
 ```
 
-Using `--namespace-level 2` prints out memory usage tabels up to the second-level namespace:
-
-![Example output](https://raw.githubusercontent.com/mienxiu/redis-sizer/refs/heads/main/docs/example_output.png)
+redis-sizer leverages this hierarchical structure to aggregate and analyze memory usage, and displays aggregated statistics for each namespace level.
 
 ## Considerations
 
 - Since data can change during analysis, the final result may not accurately reflect the database’s state at the beginning of the process.
-- For databases with large collections of keys, consider using the `--sample-size` option to balance processing time with accuracy. If `--sample-size` is not specified, redis-sizer will perform perform a full iteration.
-- Increasing `--scan-count` or `--batch-size` can reduce network overhead. However, this can increase the load on the Redis server without providing meaningful performance improvements and, in some cases, may even lead to server blocking. Adjust these values carefully based on your server’s capacity.
+- For databases with large collections of keys, consider using the `--sample-size` option to balance processing time with accuracy. If `--sample-size` is not specified, redis-sizer will perform perform a full scan.
+- Increasing `--batch-size` can reduce network overhead. However, this can increase the load on the Redis server without providing meaningful performance improvements and, in some cases, may even lead to server blocking. Adjust these values carefully based on your server’s capacity.
 
 ## Redis Version Compatibility
 

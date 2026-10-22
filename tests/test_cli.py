@@ -49,6 +49,23 @@ class TestApp(unittest.TestCase):
         self.mock_redis.register_script.assert_called()
         self.mock_redis.close.assert_called()
 
+    def test_analyze_with_max_depth(self) -> None:
+        result = self.runner.invoke(app, ["localhost", "--max-depth", "1"], env={"COLUMNS": "200"})
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("test:", result.stdout)
+        self.assertIn("other:", result.stdout)
+        self.assertNotIn("test:key1", result.stdout)
+        self.assertIn("Total Keys Scanned", result.stdout)
+
+    def test_analyze_rejects_invalid_max_depth(self) -> None:
+        for value in ["0", "-1", "invalid"]:
+            with self.subTest(value=value):
+                result = self.runner.invoke(app, ["localhost", "--max-depth", value])
+
+                self.assertEqual(result.exit_code, 2)
+                self.mock_redis_class.assert_not_called()
+
 
 class TestGetMemoryUsage(unittest.TestCase):
     """Test the _get_memory_usage function."""

@@ -37,6 +37,7 @@ Options:
 - `--namespace-separator`: Separator for key namespaces [default: :]
 - `--memory-unit`: Memory unit for display in result table [default: B]
 - `--max-leaves`: Maximum number of leaf keys to display per namespace [default: 5]
+- `--max-depth`: Maximum tree depth to display (1 shows top-level rows) [default: 5]
 - `--batch-size`: Batch size for scanning and calculating memory usage [default: 1000]
 
 ### Aggregating Memory Usage by Key Groups

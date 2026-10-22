@@ -15,6 +15,7 @@ class TableFormatter:
         memory_usage: dict[str, int],
         memory_unit: MemoryUnit,
         max_leaves: int | None = None,
+        max_depth: int | None = None,
     ) -> tuple[list[TableRow], TableRow]:
         """
         Generate table rows from the tree structure with proper indentation.
@@ -24,6 +25,7 @@ class TableFormatter:
             memory_usage: Dictionary mapping keys to their memory usage
             memory_unit: Unit for memory display
             max_leaves: Maximum number of leaf keys to display per namespace
+            max_depth: Maximum tree depth to display (root is depth 0); None shows all depths
 
         Returns:
             Tuple of (rows, total_row)
@@ -31,21 +33,23 @@ class TableFormatter:
         rows: list[TableRow] = []
         factor = memory_unit.get_factor()
 
-        # Track overall statistics
-        overall_min: int | None = None
-        overall_max: int = 0
-        total_count: int = 0
-        total_size: int = 0
+        def count_keys(node: KeyNode) -> int:
+            count = 0
+            pending = [node]
+            while pending:
+                current = pending.pop()
+                count += len(current.keys)
+                pending.extend(current.children.values())
+            return count
+
+        # Include hidden descendants in overall statistics.
+        overall_min = min(root.sizes, default=0)
+        overall_max = max(root.sizes, default=0)
+        total_count = count_keys(root)
 
         def traverse_node(node: KeyNode, parent_size: int, is_last_level: bool = False):
-            nonlocal overall_min, overall_max, total_count, total_size
-
-            # Update overall stats
-            if node.sizes:
-                for size in node.sizes:
-                    overall_min = size if overall_min is None else min(overall_min, size)
-                    overall_max = max(overall_max, size)
-                total_count += len(node.keys)
+            if max_depth is not None and node.level >= max_depth:
+                return
 
             # Handle direct keys at this level
             if node.keys:
@@ -131,13 +135,6 @@ class TableFormatter:
                     min_size = min(child_node.sizes) / factor if child_node.sizes else 0
                     max_size = max(child_node.sizes) / factor if child_node.sizes else 0
                     percentage = (child_node.size / parent_size * 100) if parent_size else 0
-
-                    # Calculate total count recursively
-                    def count_keys(n: KeyNode) -> int:
-                        count = len(n.keys)
-                        for child in n.children.values():
-                            count += count_keys(child)
-                        return count
 
                     rows.append(
                         TableRow(

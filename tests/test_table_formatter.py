@@ -62,6 +62,85 @@ class TestTableFormatter(unittest.TestCase):
         ]
         self.assertEqual(len(key_rows), 3)  # Should have exactly max_leaves 3 keys
 
+    def test_generate_rows_with_max_depth(self):
+        memory_usage = {
+            "standalone": 50,
+            "users:direct": 100,
+            "users:profiles:123": 200,
+            "users:profiles:456": 300,
+        }
+        root = self.builder.build_tree(memory_usage)
+        _, full_total = self.formatter.generate_rows(root, memory_usage, MemoryUnit.B)
+
+        for max_depth, expected_keys in [
+            (1, ["standalone", "users:"]),
+            (2, ["standalone", "users:", "users:direct", "profiles:"]),
+            (
+                3,
+                [
+                    "standalone",
+                    "users:",
+                    "users:direct",
+                    "profiles:",
+                    "users:profiles:456",
+                    "users:profiles:123",
+                ],
+            ),
+            (
+                10,
+                [
+                    "standalone",
+                    "users:",
+                    "users:direct",
+                    "profiles:",
+                    "users:profiles:456",
+                    "users:profiles:123",
+                ],
+            ),
+        ]:
+            with self.subTest(max_depth=max_depth):
+                rows, total_row = self.formatter.generate_rows(
+                    root, memory_usage, MemoryUnit.B, max_depth=max_depth
+                )
+
+                self.assertEqual([row.key.strip() for row in rows], expected_keys)
+                self.assertEqual(total_row, full_total)
+                users_row = next(row for row in rows if row.key == "users:")
+                self.assertEqual(users_row.count, "3")
+                self.assertEqual(users_row.size, "600")
+                self.assertEqual(users_row.min_size, "100")
+                self.assertEqual(users_row.max_size, "300")
+
+    def test_max_depth_with_deeply_nested_key(self):
+        memory_usage = {":".join(["ns"] * 500 + ["key"]): 100}
+        root = self.builder.build_tree(memory_usage)
+
+        rows, total_row = self.formatter.generate_rows(
+            root, memory_usage, MemoryUnit.B, max_depth=1
+        )
+
+        self.assertEqual([row.key for row in rows], ["ns:"])
+        self.assertEqual(rows[0].count, "1")
+        self.assertEqual(rows[0].size, "100")
+        self.assertEqual(total_row.count, "1")
+        self.assertEqual(total_row.size, "100")
+
+    def test_max_depth_with_max_leaves(self):
+        memory_usage = {f"ns:key{i}": 100 * (i + 1) for i in range(10)}
+        root = self.builder.build_tree(memory_usage)
+
+        rows, total_row = self.formatter.generate_rows(
+            root, memory_usage, MemoryUnit.B, max_leaves=3, max_depth=1
+        )
+        self.assertEqual([row.key for row in rows], ["ns:"])
+        self.assertEqual(total_row.count, "10")
+
+        rows, _ = self.formatter.generate_rows(
+            root, memory_usage, MemoryUnit.B, max_leaves=3, max_depth=2
+        )
+        self.assertEqual(len(rows), 5)  # Namespace, three keys, and truncation row
+        self.assertIn("... 7 more keys ...", rows[-1].key)
+
     def test_generate_rows_memory_units(self):
         """Test generating rows with different memory units."""
         memory_usage = {"test:key": 1536}  # 1.5 KB

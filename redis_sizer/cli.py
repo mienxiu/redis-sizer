@@ -33,6 +33,10 @@ def analyze(
     max_leaves: Annotated[
         int | None, typer.Option(help="Maximum number of leaf keys to display per namespace")
     ] = 5,
+    max_depth: Annotated[
+        int,
+        typer.Option(min=1, help="Maximum tree depth to display (1 shows top-level rows)"),
+    ] = 5,
     batch_size: Annotated[
         int, typer.Option(help="Batch size for scanning and calculating memory usage")
     ] = 1000,
@@ -85,7 +89,9 @@ def analyze(
     root = tree_builder.build_tree(memory_usage, namespace_separator)
 
     table_formatter = TableFormatter()
-    rows, total_row = table_formatter.generate_rows(root, memory_usage, memory_unit, max_leaves)
+    rows, total_row = table_formatter.generate_rows(
+        root, memory_usage, memory_unit, max_leaves, max_depth
+    )
     table = table_formatter.generate_table("Memory Usage", rows, total_row, memory_unit)
     console.print(table)
 
